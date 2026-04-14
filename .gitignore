@@ -1,0 +1,8 @@
+results/
+models/
+data/
+.vscode/
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+ManifoldEntropicTraining/

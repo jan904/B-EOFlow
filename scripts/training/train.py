@@ -1,0 +1,194 @@
+import os
+import numpy as np
+import torch
+import argparse
+
+from src.model.data_utils import (
+    load_data,
+    prepare_data,
+    get_condition_shapes,
+)
+from src.model.training_utils import train_INN
+from src.model.build_model import get_INN
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train INN model")
+
+    parser.add_argument("--dataset", type=str, default="kang")
+    parser.add_argument("--top_genes", type=int, default=2000)
+    parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument("--epochs", type=int, default=500)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--sigma_noise", type=float, default=1.1)
+    parser.add_argument("--lam_MTC", type=float, default=0.1)
+    parser.add_argument("--conditions", nargs="+", default=None)
+    parser.add_argument("--model_path", type=str, default="/home/jhoefer/sandbox/models/EOFlow")
+    parser.add_argument("--log_root", type=str, default="/home/jhoefer/sandbox/results/logs")
+    parser.add_argument("--model_prefix", type=str, default=None)
+    parser.add_argument("--checkpoint", action="store_true")
+    parser.add_argument("--use_counts", action="store_true")
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # Set device and dtype
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float32
+
+    # Data loading and preprocessing
+    adata, _, _ = load_data(args.dataset, args.top_genes)
+    dataset, dataloader = prepare_data(
+        adata, args.batch_size, device, dtype, counts=args.use_counts, label_key=args.conditions
+    )
+
+    D_dim = dataset.X.shape[1]
+    N_dim = D_dim
+
+    # Get condition shapes for model initialization
+    condition_shapes = None
+    if args.conditions is not None:
+        condition_shapes = get_condition_shapes(adata, args.conditions)
+
+    # Paths
+    # Define default name for model and output dir based on hyperparams
+    default_name = "MTC_" + str(args.lam_MTC) + "_sigma_" + str(args.sigma_noise)
+
+    # Model will be saved to group share
+    model_path = os.path.join(
+        "/g/stegle/jhoefer/models/EOFlow", args.dataset, "top_" + str(args.top_genes)
+    )
+
+    # Output (logs, plots) will be saved to local sandbox
+    output_dir_path = os.path.join(
+        "/home/jhoefer/sandbox/results", args.dataset, "top_" + str(args.top_genes)
+    )
+
+    # If model_prefix is provided, append it to the model name
+    if args.model_prefix is not None:
+        model_name = args.model_prefix + "_" + default_name + "_model.pt"
+        output_dir_name = args.model_prefix + "_" + default_name
+    else:
+        model_name = default_name + "_model.pt"
+        output_dir_name = default_name
+
+    # If use_counts is True, append "_counts" to model name and output dir name
+    if args.use_counts:
+        model_path += "_counts"
+        output_dir_path += "_counts"
+
+    if args.conditions is not None:
+        model_path += "_cond"
+        output_dir_path += "_cond"
+
+    model_path += "_no_actnorm"
+    output_dir_path += "_no_actnorm"
+
+    log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
+
+    os.makedirs(model_path, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+
+    # Training setup
+    kwargs_data = {
+        "device": device,
+        "dtype": dtype,
+        "N_dim": N_dim,
+        "D_dim": D_dim,
+        "dataloader": dataloader,
+        "data_mean": dataset.X.mean(dim=0),
+        "data_std": dataset.X.std(dim=0),
+        "sigma_noise": args.sigma_noise,
+        "sigma_inflate": args.sigma_noise,
+    }
+
+    kwargs_loss = {
+        "use_NLL": True,
+        "use_MER": True,
+        "mode_MER": "unbiased",  #'full', #'unbiased'
+        "lam_MTC": args.lam_MTC,
+        "lam_ME_i": list(np.zeros(D_dim)),
+        # 'use_align': False,
+        # 'dims_align': D_dim - 1,
+        # 'lam_align': 1, #0.1,
+        # 'lam_disent': 0, #0.1,
+        "use_rec": False,
+        "dims_rec": D_dim - 1,
+        "lam_rec": 100,  #
+        "sigma_noise": args.sigma_noise,
+    }
+
+    metrics_loss = {
+        "epoch": [],
+        "loss": [],
+        "z2": [],
+        "NLL": [],
+        "MTC": [],
+        "H_i": [],
+        "H_core": [],
+        "H_detail": [],
+        "MI_core_detail": [],
+        "L2_rec": [],
+    }
+
+    # Model initialization
+    flow, optimizer_flow = get_INN(
+        N_dim=N_dim,
+        condition_shapes=condition_shapes,
+        N_blocks=12,
+        ch_hidden=2048,
+        coupling_block_type="GLOW",
+        RQS_bins=10,
+        lr=1e-3,
+        optimizer_type="schedulefree",
+        warmup_steps=100,
+        pre_normalize=False,
+        normalize=False,
+    )
+    flow = flow.to(device)
+
+    start_epoch = 0
+    log_path = None
+    if os.path.exists(os.path.join(model_path, model_name)) and args.checkpoint:
+        checkpoint = torch.load(
+            os.path.join(model_path, model_name),
+            map_location=device,
+        )
+        flow.load_state_dict(checkpoint["model_state_dict"])
+        optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
+        metrics_loss = checkpoint["metrics_loss"]
+        log_path = checkpoint["log_path"]
+        start_epoch = checkpoint["epoch"] + 1
+
+    NUM_EPOCHS = int(args.epochs * N_dim / args.batch_size)
+    flow, optimizer_flow, metrics_loss, log_path = train_INN(
+        flow,
+        optimizer_flow,
+        metrics_loss,
+        kwargs_data,
+        kwargs_loss,
+        num_epochs=NUM_EPOCHS,
+        start_epoch=start_epoch,
+        print_info=True,
+        log_dir=log_dir,
+        continue_log_path=log_path,
+        save_model_path=os.path.join(model_path, model_name),
+        conditions=args.conditions,
+        use_counts=args.use_counts,
+    )
+
+    checkpoint = {
+        "epoch": start_epoch + NUM_EPOCHS - 1,
+        "model_state_dict": flow.state_dict(),
+        "optimizer_state_dict": optimizer_flow.state_dict(),
+        "metrics_loss": {k: [float(x) for x in v] for k, v in metrics_loss.items()},
+        "log_path": log_path,
+    }
+    torch.save(checkpoint, os.path.join(model_path, model_name))
+
+
+if __name__ == "__main__":
+    main()
