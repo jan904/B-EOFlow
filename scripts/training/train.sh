@@ -11,4 +11,4 @@ source /home/jhoefer/sandbox/.venv/bin/activate
 export PYTHONPATH="/home/jhoefer/sandbox/src:$PYTHONPATH"
 export PYTHONPATH="/home/jhoefer/sandbox/ManifoldEntropicTraining:$PYTHONPATH"
 
-python /home/jhoefer/sandbox/scripts/training/train.py --sigma_noise 0.5 --epochs 500 --top_genes 2000 --dataset "kang"  --lam_MTC 1.0 --batch_size 2048 
+python /home/jhoefer/sandbox/scripts/training/train.py --sigma_noise 1.1 --epochs 500 --top_genes 2000 --dataset "kang"  --lam_MTC 1.0 --batch_size 2048 

@@ -163,7 +163,7 @@ def analyze_model(
     dtype,
     sigma_noise=0.8,
     lam_MTC=1.0,
-    N_blocks=8,
+    N_blocks=12,
     use_counts=False,
     conditions=None,
     batch_size=512,
@@ -222,7 +222,7 @@ def analyze_model(
         "D_dim": D_dim,
         "dataloader": dataloader,
         "data_mean": dataset.X.mean(dim=0),
-        "data_std": dataset.X.std(dim=0),
+        "data_std": torch.ones(D_dim),
         "sigma_noise": sigma_noise,
         "sigma_inflate": sigma_noise,
     }
@@ -268,9 +268,10 @@ def analyze_model(
         kwargs_data,
         flow,
         condition_shapes=condition_shapes,
-        N_samples=256,
+        N_samples=N_samples,
         print_info=False,
         x_input=x_input,
+        subtract_mean=False,
     )
 
     with torch.no_grad():
@@ -375,6 +376,7 @@ def get_INN_from_checkpoint(
         weights_only=False,
     )
 
+    print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
     flow.load_state_dict(checkpoint["model_state_dict"])
     optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
     metrics_loss = checkpoint["metrics_loss"]
@@ -409,6 +411,7 @@ def get_ME_spectra_ablation(adata, dir_name, device, dtype, use_counts=False):
             umaps=False,
             MPMI=False,
             correlations=False,
+            pre_normalize=False,
         )
         H_is[sigma_noise][lambda_MTC] = H_i
         latent_sorts[sigma_noise][lambda_MTC] = latent_sort
@@ -487,7 +490,7 @@ def return_bottleneck_representation(
         )
 
     latent_bottleneck_representation = latent_representation[:, latent_sort[:bottleneck_dim]]
-    return latent_bottleneck_representation
+    return latent_bottleneck_representation, latent_sort
 
 
 def compare_data_entropy(N_dim, pca_variance, H):

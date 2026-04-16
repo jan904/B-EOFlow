@@ -84,8 +84,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_no_actnorm"
-    output_dir_path += "_no_actnorm"
+    # model_path += "_no_actnorm"
+    # output_dir_path += "_no_actnorm"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -146,7 +146,7 @@ def main():
         optimizer_type="schedulefree",
         warmup_steps=100,
         pre_normalize=False,
-        normalize=False,
+        normalize=True,
     )
     flow = flow.to(device)
 
