@@ -22,6 +22,7 @@ def train_INN(
     kwargs_data,
     kwargs_loss,
     save_model_path,
+    model_config,
     start_epoch=0,
     num_epochs=1,
     print_info=True,
@@ -241,10 +242,22 @@ def train_INN(
                 "log_path": log_path,
                 "counts": use_counts,
                 "conditions": conditions,
+                "model_config": model_config,
             }
             torch.save(checkpoint, save_model_path)
             logger.info("Saving checkpoint to " + save_model_path)
 
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "metrics_loss": losses,
+        "log_path": log_path,
+        "counts": use_counts,
+        "conditions": conditions,
+        "model_config": model_config,
+    }
+    torch.save(checkpoint, save_model_path)
     logger.info("Finished training. Saving model to " + save_model_path)
 
     return model, optimizer, losses, log_path

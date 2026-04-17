@@ -58,14 +58,78 @@ class AdataDataset(Dataset):
         return x, y
 
 
-def get_cell_cycle_genes() -> list:
-    # Canonical list of cell cycle genes
-    url = "https://raw.githubusercontent.com/scverse/scanpy_usage/master/180209_cell_cycle/data/regev_lab_cell_cycle_genes.txt"
-    cell_cycle_genes = requests.get(url).text.split("\n")[:-1]
-    return cell_cycle_genes
+# https://www.parsebiosciences.com/datasets/10-million-human-pbmcs-in-a-single-experiment/
+def load_parse_data(
+    donors=["Donor1"],
+    subset=[
+        "CD40L",
+        "FGF-beta",
+        "CT-1",
+        "IFN-epsilon",
+        "IL-32-beta",
+        "IL-1-beta",
+        "IL-4",
+        "CD27L",
+        "IL-2",
+        "IL-13",
+    ],
+    top_genes=2000,
+    log_transform=True,
+):
+    """
+    Process the Parse dataset with options for subsetting and data filtering.
+
+    Parameters:
+        donor (list): Donors to subset to. Defaults to ['Donor1'].
+        subset (bool): Whether to subset the data to specific cytokine labels. Defaults to True.
+        top_genes (int): Number of highly variable genes to select. Defaults to 2000.
+        log_transform (bool): Whether to apply log transformation. Defaults to True.
+
+    Returns:
+        tuple: (anndata.AnnData, labels_key, control_label) - The processed AnnData object,
+               the key for perturbation labels, and the control label.
+    """
+    # Load the dataset
+    adata = sc.read(
+        "/g/stegle/jhoefer/data/parse.h5ad",
+        backup_url="https://figshare.com/ndownloader/files/53372768",
+        backed="r",
+    )
+
+    # Keys and labels
+    labels_key = "cytokine"
+    control_label = "PBS"
+
+    # Subsample to one donor
+    if donors is not None:
+        adata = adata[adata.obs["donor"].isin(donors)]
+    adata = adata.to_memory()
+
+    # Store counts in layers
+    adata.layers["counts"] = adata.X.copy()
+
+    # Optionally subset to specific cytokines
+    if subset:
+        to_select = subset + [control_label]
+        adata = adata[adata.obs[labels_key].isin(to_select)].copy()
+
+    # Filter cells and genes
+    sc.pp.filter_cells(adata, min_counts=10)
+    sc.pp.filter_genes(adata, min_counts=10)
+
+    # Find highly variable genes
+    sc.pp.highly_variable_genes(
+        adata, subset=True, n_top_genes=top_genes, flavor="seurat_v3", layer="counts"
+    )
+
+    if log_transform:
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
+
+    return adata, labels_key, control_label
 
 
-def load_data(dataset_name, top_genes, log_transform=True):
+def load_kang_data(top_genes, log_transform=True):
     """
     Load and preprocess the {dataset_name} dataset.
 
@@ -76,15 +140,13 @@ def load_data(dataset_name, top_genes, log_transform=True):
             - control_label: string indicating the control condition label
     """
 
-    dataset_dir = get_dataset_config()
-
     # Load the data
-    save_dir = os.path.join("data", dataset_dir[dataset_name]["name"])
-    adata = sc.read(save_dir, backup_url=dataset_dir[dataset_name]["url"])
+    save_dir = os.path.join("/g/stegle/jhoefer/data", "kang_counts_25k.h5ad")
+    adata = sc.read(save_dir, backup_url="https://figshare.com/ndownloader/files/34464122")
 
     # Set metadata
-    labels_key = dataset_dir[dataset_name]["labels_key"]
-    control_label = dataset_dir[dataset_name]["control_label"]
+    labels_key = "condition"
+    control_label = "ctrl"
 
     # Filter cells and genes
     sc.pp.filter_cells(adata, min_counts=1000)
@@ -128,33 +190,19 @@ def load_data(dataset_name, top_genes, log_transform=True):
     return adata, labels_key, control_label
 
 
+def load_data(dataset_name, top_genes, log_transform=True):
+    if dataset_name == "kang":
+        return load_kang_data(top_genes=top_genes, log_transform=log_transform)
+    elif dataset_name == "parse":
+        return load_parse_data(top_genes=top_genes, log_transform=log_transform)
+    else:
+        raise ValueError(f"Unknown dataset name: {dataset_name}")
+
+
 def prepare_data(adata, batchsize, device, dtype, label_key=None, counts=False):
     dataset = AdataDataset(adata, label_key=label_key, device=device, dtype=dtype, counts=counts)
     dataloader = DataLoader(dataset, batch_size=batchsize, shuffle=True)
     return dataset, dataloader
-
-
-def get_dataset_config():
-    return {
-        "kang": {
-            "name": "kang_counts_25k.h5ad",
-            "url": "https://figshare.com/ndownloader/files/34464122",
-            "labels_key": "condition",
-            "control_label": "ctrl",
-        },
-        "lung": {
-            "name": "lung_atlas.h5ad",
-            "url": "https://figshare.com/ndownloader/files/24539942",
-            "labels_key": "gene_program",
-            "control_label": "ctrl",
-        },
-        "intestinal epithelium": {
-            "counts": "infected_samples_UMIcounts.txt.gz",
-            "metadata": "atlas_metadata.txt",
-            "labels_key": "condition",
-            "control_label": "uninfected",
-        },
-    }
 
 
 def get_condition_shapes(adata, conditions):

@@ -9,7 +9,7 @@ from src.model.data_utils import (
     get_condition_shapes,
 )
 from src.model.training_utils import train_INN
-from src.model.build_model import get_INN
+from src.model.build_model import get_INN, ModelConfig
 
 
 def parse_args():
@@ -134,22 +134,6 @@ def main():
         "L2_rec": [],
     }
 
-    # Model initialization
-    flow, optimizer_flow = get_INN(
-        N_dim=N_dim,
-        condition_shapes=condition_shapes,
-        N_blocks=12,
-        ch_hidden=2048,
-        coupling_block_type="GLOW",
-        RQS_bins=10,
-        lr=1e-3,
-        optimizer_type="schedulefree",
-        warmup_steps=100,
-        pre_normalize=False,
-        normalize=True,
-    )
-    flow = flow.to(device)
-
     start_epoch = 0
     log_path = None
     if os.path.exists(os.path.join(model_path, model_name)) and args.checkpoint:
@@ -157,11 +141,29 @@ def main():
             os.path.join(model_path, model_name),
             map_location=device,
         )
+
+        model_config = checkpoint["model_config"]
+        flow, optimizer_flow = get_INN(model_config)
+        flow = flow.to(device)
         flow.load_state_dict(checkpoint["model_state_dict"])
         optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
+
         metrics_loss = checkpoint["metrics_loss"]
         log_path = checkpoint["log_path"]
         start_epoch = checkpoint["epoch"] + 1
+
+    else:
+        model_config = ModelConfig(
+            N_dim=N_dim,
+            condition_shapes=condition_shapes,
+            ch_hidden=2048,
+            lr=args.lr,
+            pre_normalize=False,
+        )
+
+        # Model initialization
+        flow, optimizer_flow = get_INN(model_config)
+        flow = flow.to(device)
 
     NUM_EPOCHS = int(args.epochs * N_dim / args.batch_size)
     flow, optimizer_flow, metrics_loss, log_path = train_INN(
@@ -170,6 +172,7 @@ def main():
         metrics_loss,
         kwargs_data,
         kwargs_loss,
+        model_config=model_config,
         num_epochs=NUM_EPOCHS,
         start_epoch=start_epoch,
         print_info=True,
@@ -179,15 +182,6 @@ def main():
         conditions=args.conditions,
         use_counts=args.use_counts,
     )
-
-    checkpoint = {
-        "epoch": start_epoch + NUM_EPOCHS - 1,
-        "model_state_dict": flow.state_dict(),
-        "optimizer_state_dict": optimizer_flow.state_dict(),
-        "metrics_loss": {k: [float(x) for x in v] for k, v in metrics_loss.items()},
-        "log_path": log_path,
-    }
-    torch.save(checkpoint, os.path.join(model_path, model_name))
 
 
 if __name__ == "__main__":

@@ -256,10 +256,6 @@ def analyze_model(
         model_dir=model_path,
         model_name=model_name,
         device=device,
-        N_dim=N_dim,
-        condition_shapes=condition_shapes,
-        N_blocks=N_blocks,
-        pre_normalize=pre_normalize,
     )
 
     x_input = torch.tensor(adata.X.toarray(), dtype=torch.float32, device=device)[:N_samples]
@@ -346,29 +342,11 @@ def get_INN_from_checkpoint(
     model_dir,
     model_name,
     device,
-    N_dim=2000,
-    N_blocks=12,
-    condition_shapes=None,
-    pre_normalize=False,
 ):
 
     checkpoint_path = os.path.join(model_dir, model_name)
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
-
-    flow, optimizer_flow = get_INN(
-        N_dim=N_dim,
-        condition_shapes=condition_shapes,
-        N_blocks=N_blocks,
-        ch_hidden=2048,
-        coupling_block_type="GLOW",
-        RQS_bins=10,
-        lr=1e-3,
-        optimizer_type="schedulefree",
-        warmup_steps=100,
-        pre_normalize=pre_normalize,
-    )
-    flow = flow.to(device)
 
     checkpoint = torch.load(
         checkpoint_path,
@@ -376,9 +354,13 @@ def get_INN_from_checkpoint(
         weights_only=False,
     )
 
-    print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
+    model_config = checkpoint["model_config"]
+    flow, optimizer_flow = get_INN(model_config)
+    flow = flow.to(device)
     flow.load_state_dict(checkpoint["model_state_dict"])
     optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
     metrics_loss = checkpoint["metrics_loss"]
 
     return flow, optimizer_flow, metrics_loss
@@ -447,9 +429,7 @@ def return_bottleneck_representation(
     flow, _, _ = get_INN_from_checkpoint(
         model_dir,
         model_name,
-        condition_shapes=condition_shapes,
         device=device,
-        pre_normalize=pre_normalize,
     )
 
     kwargs_data = {
