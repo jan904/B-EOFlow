@@ -75,6 +75,7 @@ def load_parse_data(
     ],
     top_genes=2000,
     log_transform=True,
+    cell_types=None,
 ):
     """
     Process the Parse dataset with options for subsetting and data filtering.
@@ -84,6 +85,7 @@ def load_parse_data(
         subset (bool): Whether to subset the data to specific cytokine labels. Defaults to True.
         top_genes (int): Number of highly variable genes to select. Defaults to 2000.
         log_transform (bool): Whether to apply log transformation. Defaults to True.
+        cell_types (list): List of cell types to include. Defaults to None.
 
     Returns:
         tuple: (anndata.AnnData, labels_key, control_label) - The processed AnnData object,
@@ -104,6 +106,10 @@ def load_parse_data(
     if donors is not None:
         adata = adata[adata.obs["donor"].isin(donors)]
     adata = adata.to_memory()
+
+    # Optionally subset to specific cell types
+    if cell_types is not None:
+        adata = adata[adata.obs["cell_type"].isin(cell_types)].copy()
 
     # Store counts in layers
     adata.layers["counts"] = adata.X.copy()
@@ -190,11 +196,13 @@ def load_kang_data(top_genes, log_transform=True):
     return adata, labels_key, control_label
 
 
-def load_data(dataset_name, top_genes, log_transform=True):
+def load_data(dataset_name, top_genes, log_transform=True, cell_types=None):
     if dataset_name == "kang":
         return load_kang_data(top_genes=top_genes, log_transform=log_transform)
     elif dataset_name == "parse":
-        return load_parse_data(top_genes=top_genes, log_transform=log_transform)
+        return load_parse_data(
+            top_genes=top_genes, log_transform=log_transform, cell_types=cell_types
+        )
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
 

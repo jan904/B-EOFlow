@@ -40,7 +40,9 @@ def main():
     dtype = torch.float32
 
     # Data loading and preprocessing
-    adata, _, _ = load_data(args.dataset, args.top_genes)
+    adata, _, _ = load_data(
+        args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
+    )
     dataset, dataloader = prepare_data(
         adata, args.batch_size, device, dtype, counts=args.use_counts, label_key=args.conditions
     )
