@@ -55,18 +55,20 @@ def main():
     if args.conditions is not None:
         condition_shapes = get_condition_shapes(adata, args.conditions)
 
+    top_genes = min(args.top_genes, D_dim)
+
     # Paths
     # Define default name for model and output dir based on hyperparams
     default_name = "MTC_" + str(args.lam_MTC) + "_sigma_" + str(args.sigma_noise)
 
     # Model will be saved to group share
     model_path = os.path.join(
-        "/g/stegle/jhoefer/models/EOFlow", args.dataset, "top_" + str(args.top_genes)
+        "/g/stegle/jhoefer/models/EOFlow", args.dataset, "top_" + str(top_genes)
     )
 
     # Output (logs, plots) will be saved to local sandbox
     output_dir_path = os.path.join(
-        "/home/jhoefer/sandbox/results", args.dataset, "top_" + str(args.top_genes)
+        "/home/jhoefer/sandbox/results", args.dataset, "top_" + str(top_genes)
     )
 
     # If model_prefix is provided, append it to the model name
