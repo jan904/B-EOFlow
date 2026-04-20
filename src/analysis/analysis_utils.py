@@ -70,6 +70,7 @@ def analyze_result(
     H,
     N_dim,
     metrics_loss,
+    labels_key,
     conditions=None,
     plot_dir=None,
     device="cpu",
@@ -119,7 +120,7 @@ def analyze_result(
     adata = compute_neighbors(adata, use_rep=use_rep)
 
     # Plot data colored by condition and cell type
-    plot_umap(adata, color=["condition", "cell_type"], plot_dir=plot_dir)
+    plot_umap(adata, color=[f"{labels_key}", "cell_type"], plot_dir=plot_dir)
 
     # Plot data colored by latent effect of EOFlow and PCA
     compare_latent_effects(
@@ -161,6 +162,7 @@ def analyze_model(
     output_dir_path,
     device,
     dtype,
+    labels_key,
     sigma_noise=0.8,
     lam_MTC=1.0,
     N_blocks=12,
@@ -284,6 +286,7 @@ def analyze_model(
             H,
             N_dim,
             metrics_loss,
+            labels_key=labels_key,
             conditions=conditions,
             plot_dir=plot_dir,
             device=device,
@@ -366,7 +369,7 @@ def get_INN_from_checkpoint(
     return flow, optimizer_flow, metrics_loss
 
 
-def get_ME_spectra_ablation(adata, dir_name, device, dtype, use_counts=False):
+def get_ME_spectra_ablation(adata, dir_name, device, dtype, labels_key, use_counts=False):
     H_is = {}
     latent_sorts = {}
 
@@ -387,6 +390,7 @@ def get_ME_spectra_ablation(adata, dir_name, device, dtype, use_counts=False):
             "/home/jhoefer/sandbox/results",
             device,
             dtype,
+            labels_key=labels_key,
             sigma_noise=sigma_noise,
             lam_MTC=lambda_MTC,
             use_counts=use_counts,

@@ -159,7 +159,6 @@ def train_INN(
 
             # assert error if loss is nan
             if torch.isnan(loss):
-                pass
                 raise ValueError("Loss is NaN. Stopping training.")
 
             loss.backward()

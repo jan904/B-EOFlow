@@ -194,6 +194,7 @@ def get_loss(model, x, kwargs_data, kwargs_loss, c=None, metrics_last=None):
                     batchsize * N_dim
                 )
 
+            print(f"NLL: {NLL}, NLL_i: {NLL_i}")
             H_core = torch.tensor(0.0).to(device)
             H_detail = torch.tensor(0.0).to(device)
             MI_core_detail = torch.tensor(0.0).to(device)
