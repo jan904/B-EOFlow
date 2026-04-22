@@ -5,6 +5,7 @@ from tqdm import tqdm
 import importlib
 import sys
 import os
+import time
 
 from src.model.loss_utils import get_loss, round_loss
 from src.utils.logger import get_logger
@@ -116,8 +117,10 @@ def train_INN(
     if print_info:
         info_func = lambda x: tqdm(x)
 
+    times = []
     for epoch in info_func(range(start_epoch, start_epoch + num_epochs)):
         for i_batch, (x, c) in enumerate(dataloader):
+            start = time.time()
             optimizer.zero_grad()
 
             if conditions is not None and c != -1:
@@ -187,6 +190,9 @@ def train_INN(
                     losses["sing_vals"], metrics["sing_vals"].cpu().detach().numpy()
                 )
             optimizer.step()
+
+            end = time.time()
+            times.append(end - start)
 
         if logging:
 
@@ -271,5 +277,7 @@ def train_INN(
     }
     torch.save(checkpoint, save_model_path)
     logger.info("Finished training. Saving model to " + save_model_path)
+
+    print(f"Average time per update: {np.mean(times):.4f} seconds")
 
     return model, optimizer, losses, log_path

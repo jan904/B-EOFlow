@@ -88,8 +88,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    # model_path += "_no_actnorm"
-    # output_dir_path += "_no_actnorm"
+    model_path += "_batch_ablation"
+    output_dir_path += "_batch_ablation"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -163,13 +163,14 @@ def main():
             ch_hidden=2048,
             lr=args.lr,
             pre_normalize=False,
+            normalize=True,
         )
 
         # Model initialization
         flow, optimizer_flow = get_INN(model_config)
         flow = flow.to(device)
 
-    NUM_EPOCHS = int(args.epochs * N_dim / args.batch_size)
+    NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
     flow, optimizer_flow, metrics_loss, log_path = train_INN(
         flow,
         optimizer_flow,
