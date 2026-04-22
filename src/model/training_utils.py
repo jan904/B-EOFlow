@@ -133,7 +133,7 @@ def train_INN(
                 x = x.clone().detach().to(device=device, dtype=dtype)
 
             # Normalizing data
-            # x = x - data_mean  # / data_std
+            # x = x - data_mean / data_std
 
             # Noise data
             x = x + torch.randn_like(x) * sigma_noise

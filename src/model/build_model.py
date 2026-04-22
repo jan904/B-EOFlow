@@ -31,7 +31,7 @@ class ModelConfig:
     rotate_random: bool = True
     normalize: bool = True
     post_rotate: bool = True
-    lr: float = 1e-3
+    lr: float = 5e-4
     optimizer_type: str = "schedulefree"
     warmup_steps: int = 100
 

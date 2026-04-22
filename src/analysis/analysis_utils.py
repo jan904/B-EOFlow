@@ -260,7 +260,9 @@ def analyze_model(
         device=device,
     )
 
-    x_input = torch.tensor(adata.X.toarray(), dtype=torch.float32, device=device)[:N_samples]
+    idx = torch.randperm(adata.X.shape[0])[:N_samples]
+    x_input = torch.tensor(adata.X.toarray(), dtype=torch.float32, device=device)[idx]
+    x_input = x_input + torch.randn_like(x_input) * sigma_noise
 
     jac_dec, ljd, z, x = get_jacobian(
         kwargs_data,
