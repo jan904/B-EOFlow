@@ -88,8 +88,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_layers_ablation"
-    output_dir_path += "_layers_ablation"
+    model_path += "_small_batch_ablation"
+    output_dir_path += "_small_batch_ablation"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -111,7 +111,7 @@ def main():
 
     kwargs_loss = {
         "use_NLL": True,
-        "use_MER": True,
+        "use_MER": False,
         "mode_MER": "unbiased",  #'full', #'unbiased'
         "lam_MTC": args.lam_MTC,
         "lam_ME_i": list(np.zeros(D_dim)),
@@ -163,7 +163,7 @@ def main():
             ch_hidden=2048,
             N_blocks=12,
             lr=args.lr,
-            warmpup_steps=2 * len(dataloader),
+            warmup_steps=2 * len(dataloader),
             pre_normalize=False,
             normalize=True,
         )
