@@ -35,17 +35,15 @@ except KeyError:
     pass
 
 
-def get_losses_ablation(dir_name, device):
+def get_losses_ablation(dir_name, key_position, device):
     losses = {}
     for model in os.listdir(dir_name):
         print(f"Evalutating model: {model}")
         loss = get_loss_from_checkpoint(dir_name, model, device)
 
-        lambda_MTC = model.split("_")[1]
-        sigma_noise = model.split("_")[3]
-        if sigma_noise not in losses:
-            losses[sigma_noise] = {}
-        losses[sigma_noise][lambda_MTC] = loss
+        key = model.split("_")[key_position]
+        losses[key] = loss
+
     return losses
 
 

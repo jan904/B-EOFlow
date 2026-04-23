@@ -7,7 +7,7 @@ import sys
 import os
 import time
 
-from src.model.loss_utils import get_loss, round_loss
+from src.model.loss_utils import get_loss, round_loss, DimensionSampler
 from src.utils.logger import get_logger
 
 try:
@@ -63,7 +63,7 @@ def train_INN(
 
     print(f"Sigma noise: {kwargs_loss['sigma_noise']}")
     sigma_noise = kwargs_loss["sigma_noise"]
-
+    logger.info(model_config)
     if logging:
         if start_epoch > 0:
             logger.info("")
@@ -117,6 +117,8 @@ def train_INN(
     if print_info:
         info_func = lambda x: tqdm(x)
 
+    sampler = DimensionSampler(N_dim=kwargs_data["N_dim"], device=device)
+
     times = []
     for epoch in info_func(range(start_epoch, start_epoch + num_epochs)):
         for i_batch, (x, c) in enumerate(dataloader):
@@ -157,7 +159,7 @@ def train_INN(
                     losses["H_i"][-kwargs_data["N_dim"] :], device=device, dtype=dtype
                 )
             loss, metrics = get_loss(
-                model, x, kwargs_data, kwargs_loss, c=c, metrics_last=metrics_last
+                model, x, kwargs_data, kwargs_loss, sampler, c=c, metrics_last=metrics_last
             )
 
             # assert error if loss is nan

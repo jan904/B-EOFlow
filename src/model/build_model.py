@@ -37,9 +37,7 @@ class ModelConfig:
 
 
 # def simple_INN_init(N_dim, N_blocks = 8, conditions = 0, N_conv_blocks=None, padding_size=1, symmetric_convolution=False, subnet_fc=None, act_func='relu', ch_hidden=None, n_hidden_layers=2, ch_hidden_conv=16, bins=10, coupling_block_type = 'GLOW', clamp=2.0, kwargs_rotations={}, permute_random=False, permute_random=True, permute_random_soft=False, householder_perms=2, use_actnorms=True, use_rotations=True, lr=1e-3, device=None):
-def get_INN(
-    config: ModelConfig,
-):
+def get_INN(config):
 
     flow = Ff.SequenceINN(config.N_dim)
 

@@ -5,6 +5,48 @@ from torch.autograd.forward_ad import dual_level, make_dual, unpack_dual
 import numpy as np
 
 
+class DimensionSampler:
+    def __init__(self, N_dim, device):
+        self.N_dim = N_dim
+        self.counts = torch.zeros(N_dim)
+        self.device = device
+
+    def _get_adjusted_p(self, p):
+        counts = self.counts
+
+        sample_weights = 1.0 / (counts + 1.0)
+        sample_weights = sample_weights / sample_weights.sum()
+
+        adjusted_p = torch.tensor(p) * sample_weights
+        adjusted_p = adjusted_p / adjusted_p.sum()
+        return adjusted_p
+
+    def sample(self, batchsize):
+        p = [1 / self.N_dim] * self.N_dim
+        adjusted_p = self._get_adjusted_p(p)
+
+        if batchsize >= self.N_dim:
+            e = torch.multinomial(torch.tensor(adjusted_p), batchsize, replacement=True).to(
+                self.device
+            )
+            # if N_dim <= batchsize: #ensure each dimension is sampled at least once
+            rand_perm = torch.randperm(self.N_dim)
+            e[rand_perm[0 : self.N_dim]] = torch.arange(0, self.N_dim).to(self.device)
+
+        else:
+            e = torch.multinomial(torch.tensor(adjusted_p), batchsize, replacement=True).to(
+                self.device
+            )
+            rand_perm = torch.randperm(self.N_dim)
+            e[0:batchsize] = rand_perm[0:batchsize].to(self.device)
+
+        for dim in e:
+            self.counts[dim.item()] += 1
+
+        e = nn.functional.one_hot(e, num_classes=self.N_dim).to(torch.float32)
+        return e
+
+
 def round_loss(loss, round=4):
     # check if loss is a list
     if isinstance(loss, list):
@@ -23,7 +65,7 @@ def get_NLL_z(kwargs_data, z=None):
     return 1 / 2 * (z**2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
 
 
-def get_loss(model, x, kwargs_data, kwargs_loss, c=None, metrics_last=None):
+def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=None):
     use_NLL = (
         kwargs_loss.get("use_NLL", True) * 1
     )  # use Negative Log-Likelihood-loss (Maximum Likelihood)
@@ -136,19 +178,7 @@ def get_loss(model, x, kwargs_data, kwargs_loss, c=None, metrics_last=None):
             with torch.no_grad():
                 MTC = (torch.sum(NLL_i, dim=(-1)) - NLL).mean().detach()
         elif mode_MER == "unbiased":
-            # sample random indices
-            p = [1 / N_dim] * N_dim
-
-            if batchsize >= N_dim:
-                e = torch.multinomial(torch.tensor(p), batchsize, replacement=True).to(device)
-                # if N_dim <= batchsize: #ensure each dimension is sampled at least once
-                rand_perm = torch.randperm(N_dim)
-                e[rand_perm[0:N_dim]] = torch.arange(0, N_dim).to(device)
-            else:
-                e = torch.multinomial(torch.tensor(p), batchsize, replacement=True).to(device)
-                rand_perm = torch.randperm(N_dim)
-                e[0:batchsize] = rand_perm[0:batchsize].to(device)
-            e = nn.functional.one_hot(e, num_classes=N_dim).to(x.dtype)  # create one-hot-vector
+            e = sampler.sample(batchsize)
 
             with dual_level():  # compute jvp
                 dual_z = make_dual(z, e)

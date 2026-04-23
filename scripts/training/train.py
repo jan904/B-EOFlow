@@ -88,8 +88,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_batch_ablation"
-    output_dir_path += "_batch_ablation"
+    model_path += "_layers_ablation"
+    output_dir_path += "_layers_ablation"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -147,7 +147,7 @@ def main():
         )
 
         model_config = checkpoint["model_config"]
-        flow, optimizer_flow = get_INN(model_config)
+        flow, optimizer_flow = get_INN(config=model_config)
         flow = flow.to(device)
         flow.load_state_dict(checkpoint["model_state_dict"])
         optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -161,14 +161,16 @@ def main():
             N_dim=N_dim,
             condition_shapes=condition_shapes,
             ch_hidden=2048,
+            N_blocks=12,
             lr=args.lr,
             pre_normalize=False,
             normalize=True,
         )
 
         # Model initialization
-        flow, optimizer_flow = get_INN(model_config)
+        flow, optimizer_flow = get_INN(config=model_config)
         flow = flow.to(device)
+        print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
     flow, optimizer_flow, metrics_loss, log_path = train_INN(
