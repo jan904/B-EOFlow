@@ -163,6 +163,7 @@ def main():
             ch_hidden=2048,
             N_blocks=12,
             lr=args.lr,
+            warmpup_steps=2 * len(dataloader),
             pre_normalize=False,
             normalize=True,
         )
