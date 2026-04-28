@@ -98,11 +98,11 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
         assert metrics_last["H_i"] is not None
         H_i = metrics_last["H_i"]
 
-    elif mode_MER == "unbiased":
-        # assert that there are more or equal samples than dimensions
-        assert (
-            batchsize >= N_dim
-        ), "For unbiased MER, number of samples must be larger than or equal to number of dimensions!"
+    # elif mode_MER == "unbiased":
+    #     # assert that there are more or equal samples than dimensions
+    #     assert (
+    #         batchsize >= N_dim
+    #     ), "For unbiased MER, number of samples must be larger than or equal to number of dimensions!"
     lam_MTC = kwargs_loss["lam_MTC"]  # weight of Manifold Total Correlation term
     lam_ME_i = kwargs_loss["lam_ME_i"]  # weights of Manifold Entropy terms per dimension
 

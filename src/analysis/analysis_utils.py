@@ -41,7 +41,10 @@ def get_losses_ablation(dir_name, key_position, device):
         print(f"Evalutating model: {model}")
         loss = get_loss_from_checkpoint(dir_name, model, device)
 
-        key = model.split("_")[key_position]
+        key = ""
+        for pos in key_position:
+            key += model.split("_")[pos] + "_"
+        key = key[:-1]  # Remove the trailing underscore
         losses[key] = loss
 
     return losses
@@ -303,7 +306,7 @@ def analyze_model(
             latent_sort=latent_sort[:9],
             device=device,
             condition=conditions if conditions is not None else None,
-            label_keys=["condition", "cell_type"],
+            label_keys=[f"{labels_key}", "cell_type"],
         )
 
         df = pd.DataFrame(
@@ -377,8 +380,9 @@ def get_ME_spectra_ablation(adata, dir_name, device, dtype, labels_key, use_coun
         print(f"Evalutating model: {model}")
         model_path = os.path.join(dir_name, model)
 
-        lambda_MTC = model.split("_")[1]
-        sigma_noise = model.split("_")[3]
+        corrected_name = model[1:]
+        lambda_MTC = corrected_name.split("_")[1]
+        sigma_noise = corrected_name.split("_")[3]
 
         if sigma_noise not in H_is:
             H_is[sigma_noise] = {}
@@ -391,13 +395,14 @@ def get_ME_spectra_ablation(adata, dir_name, device, dtype, labels_key, use_coun
             device,
             dtype,
             labels_key=labels_key,
-            sigma_noise=sigma_noise,
-            lam_MTC=lambda_MTC,
+            sigma_noise=float(sigma_noise),
+            lam_MTC=float(lambda_MTC),
             use_counts=use_counts,
             umaps=False,
             MPMI=False,
             correlations=False,
             pre_normalize=False,
+            prefix="",
         )
         H_is[sigma_noise][lambda_MTC] = H_i
         latent_sorts[sigma_noise][lambda_MTC] = latent_sort

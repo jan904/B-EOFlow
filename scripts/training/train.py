@@ -88,8 +88,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_small_batch_ablation"
-    output_dir_path += "_small_batch_ablation"
+    # model_path += "_lr_ablation"
+    # output_dir_path += "_lr_ablation"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -104,14 +104,14 @@ def main():
         "D_dim": D_dim,
         "dataloader": dataloader,
         "data_mean": dataset.X.mean(dim=0),
-        "data_std": dataset.X.std(dim=0),
+        "data_std": torch.ones(D_dim),
         "sigma_noise": args.sigma_noise,
         "sigma_inflate": args.sigma_noise,
     }
 
     kwargs_loss = {
         "use_NLL": True,
-        "use_MER": False,
+        "use_MER": True,
         "mode_MER": "unbiased",  #'full', #'unbiased'
         "lam_MTC": args.lam_MTC,
         "lam_ME_i": list(np.zeros(D_dim)),
@@ -164,7 +164,7 @@ def main():
             N_blocks=12,
             lr=args.lr,
             warmup_steps=2 * len(dataloader),
-            pre_normalize=False,
+            pre_normalize=True,
             normalize=True,
         )
 
