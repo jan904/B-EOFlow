@@ -65,7 +65,11 @@ def get_NLL_z(kwargs_data, z=None):
     return 1 / 2 * (z**2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
 
 
+import time
+
+
 def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=None):
+    start_ = time.time()
     use_NLL = (
         kwargs_loss.get("use_NLL", True) * 1
     )  # use Negative Log-Likelihood-loss (Maximum Likelihood)
@@ -110,8 +114,17 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
 
     get_jac_sing_vals = kwargs_loss.get("get_jac_sing_vals", False)
 
+    t1 = time.time() - start_
+    start = time.time()
+
     z, ljd_enc = model(x, c=c, rev=False)  # pass through encoder
+
+    t2 = time.time() - start
+    start = time.time()
+
     NLL_z_i = get_NLL_z(kwargs_data, z=z)  # NLL per dimension
+    t3 = time.time() - start
+    start = time.time()
 
     NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
     if use_MER or eval_MEMetrics:
@@ -194,6 +207,9 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
 
             lam_ME_i = torch.tensor(lam_ME_i).to(device)[None, :]  # [1 x D]
 
+            t4 = time.time() - start
+            start = time.time()
+
             if batchsize >= N_dim:
                 NLL_i = m[:, M] * ljd_dec_i + M[None, :] * NLL_z_i  # [B x D]
 
@@ -219,10 +235,14 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
                         MTC = torch.tensor(0.0).to(device)
                     else:
                         MTC = H_i.sum(-1) - NLL.mean().detach()
+                t5 = time.time() - start
+                start = time.time()
 
                 loss = (torch.sum((1 - lam_MTC) * (use_NLL * NLL), dim=(0)) + NLL_i) / (
                     batchsize * N_dim
                 )
+                t6 = time.time() - start
+                start = time.time()
 
             H_core = torch.tensor(0.0).to(device)
             H_detail = torch.tensor(0.0).to(device)
@@ -247,7 +267,7 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
     else:
         L2_rec = torch.tensor(0.0).to(device)
 
-    # loss is used for backpropagation
+    # loss is used for sbackpropagation
     # ML, MTC and MSE in losses_eval are used for evaluation during training
 
     metrics = {
@@ -271,4 +291,14 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
         S = -torch.log(S)
         # save
         metrics["sing_vals"] = S
+
+    t7 = time.time() - start
+    full_time = time.time() - start_
+
+    print(f"Time for forward pass: {full_time:.4f} seconds")
+    print(
+        f"T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f}, T6: {t6/full_time:.2f}",
+        f"T7: {t7/full_time:.2f}",
+    )
+
     return loss, metrics

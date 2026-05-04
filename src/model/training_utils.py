@@ -122,7 +122,7 @@ def train_INN(
     times = []
     for epoch in info_func(range(start_epoch, start_epoch + num_epochs)):
         for i_batch, (x, c) in enumerate(dataloader):
-            start = time.time()
+            start_ = time.time()
             optimizer.zero_grad()
 
             if conditions is not None and c != -1:
@@ -147,6 +147,9 @@ def train_INN(
                 print("Warning: No zero values in the data after adding noise.")
             x.requires_grad = True
 
+            t1 = time.time() - start_
+            start = time.time()
+
             # insert metrics from last update
             metrics_last = {}
             if len(losses["H_i"]) < kwargs_data["N_dim"]:
@@ -158,15 +161,25 @@ def train_INN(
                 metrics_last["H_i"] = torch.tensor(
                     losses["H_i"][-kwargs_data["N_dim"] :], device=device, dtype=dtype
                 )
+
+            t2 = time.time() - start
+            start = time.time()
+
             loss, metrics = get_loss(
                 model, x, kwargs_data, kwargs_loss, sampler, c=c, metrics_last=metrics_last
             )
+            t3 = time.time() - start
+            start = time.time()
 
             # assert error if loss is nan
             if torch.isnan(loss):
                 raise ValueError("Loss is NaN. Stopping training.")
 
             loss.backward()
+            optimizer.step()
+
+            t4 = time.time() - start
+            start = time.time()
 
             # torch.nn.utils.clip_grad_norm_(f.parameters(), 10)
             losses["epoch"] = np.append(losses["epoch"], epoch)
@@ -191,10 +204,9 @@ def train_INN(
                 losses["sing_vals"] = np.append(
                     losses["sing_vals"], metrics["sing_vals"].cpu().detach().numpy()
                 )
-            optimizer.step()
 
             end = time.time()
-            times.append(end - start)
+            times.append(end - start_)
 
         if logging:
 
@@ -251,6 +263,13 @@ def train_INN(
                 + str(round_loss(losses["NLL"][-N_batches:].mean()))
                 + " | "
                 + losses_regularization
+            )
+
+            t5 = time.time() - start
+            full_time = time.time() - start_
+
+            print(
+                f"Time for epoch {epoch}: {full_time:.4f} seconds (T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f})"
             )
 
         if epoch % 50 == 0:

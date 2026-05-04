@@ -29,7 +29,7 @@ from src.model.data_utils import AdataDataset
 
 def augment_with_noise(X, noise_levels):
     """Augment X with multiple noise levels, appending to original data."""
-    X_augmented = [X]  # start with original
+    X_augmented = []  # start with original
     for noise_level in noise_levels:
         X_noisy = X + np.random.randn(*X.shape) * noise_level
         X_augmented.append(X_noisy)

@@ -420,19 +420,26 @@ def return_bottleneck_representation(
     N_dim=2000,
     conditions=None,
     bottleneck_dim=100,
-    pre_normalize=False,
+    N_samples=256,
+    prefix="",
 ):
     if conditions is not None:
         model_name = (
-            conditions[0] + "_MTC_" + str(lam_MTC) + "_sigma_" + str(sigma_noise) + "_model.pt"
+            conditions[0]
+            + prefix
+            + "_MTC_"
+            + str(lam_MTC)
+            + "_sigma_"
+            + str(sigma_noise)
+            + "_model.pt"
         )
     else:
-        model_name = "MTC_" + str(lam_MTC) + "_sigma_" + str(sigma_noise) + "_model.pt"
+        model_name = prefix + "MTC_" + str(lam_MTC) + "_sigma_" + str(sigma_noise) + "_model.pt"
 
     D_dim = N_dim
 
     dataset = AdataDataset(adata, label_key=conditions)
-    dataloader = DataLoader(dataset, batch_size=adata.X.shape[0], shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=2048, shuffle=False)
 
     condition_shapes = get_condition_shapes(adata, conditions) if conditions is not None else None
     flow, _, _ = get_INN_from_checkpoint(
@@ -469,8 +476,18 @@ def return_bottleneck_representation(
     if conditions is not None:
         condition_shapes = get_condition_shapes(adata, conditions)
 
+    idx = torch.randperm(adata.X.shape[0])[:N_samples]
+    x_input = torch.tensor(adata.X.toarray(), dtype=torch.float32, device=device)[idx]
+    x_input = x_input + torch.randn_like(x_input) * sigma_noise
+
     jac_dec, ljd, z, x = get_jacobian(
-        kwargs_data, flow, condition_shapes=condition_shapes, N_samples=128, print_info=False
+        kwargs_data,
+        flow,
+        condition_shapes=condition_shapes,
+        N_samples=N_samples,
+        print_info=False,
+        x_input=x_input,
+        subtract_mean=False,
     )
 
     with torch.no_grad():

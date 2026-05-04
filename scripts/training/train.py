@@ -19,9 +19,10 @@ def parse_args():
     parser.add_argument("--top_genes", type=int, default=2000)
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--sigma_noise", type=float, default=1.1)
-    parser.add_argument("--lam_MTC", type=float, default=0.1)
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--sigma_noise", type=float, default=0.5)
+    parser.add_argument("--lam_MTC", type=float, default=1.0)
+    parser.add_argument("--width", type=int, default=2048)
     parser.add_argument("--conditions", nargs="+", default=None)
     parser.add_argument("--model_path", type=str, default="/home/jhoefer/sandbox/models/EOFlow")
     parser.add_argument("--log_root", type=str, default="/home/jhoefer/sandbox/results/logs")
@@ -88,8 +89,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    # model_path += "_lr_ablation"
-    # output_dir_path += "_lr_ablation"
+    model_path += "_rotate_random_ablation"
+    output_dir_path += "_rotate_random_ablation"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -160,12 +161,13 @@ def main():
         model_config = ModelConfig(
             N_dim=N_dim,
             condition_shapes=condition_shapes,
-            ch_hidden=2048,
+            ch_hidden=args.width,
             N_blocks=12,
             lr=args.lr,
             warmup_steps=2 * len(dataloader),
             pre_normalize=True,
             normalize=True,
+            rotate_random=False,
         )
 
         # Model initialization

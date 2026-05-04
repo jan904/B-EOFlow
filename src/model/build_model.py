@@ -28,7 +28,7 @@ class ModelConfig:
     pre_rotate: bool = True
     pre_normalize: bool = False
     permute_random: bool = True
-    rotate_random: bool = True
+    rotate_random: bool = False
     normalize: bool = True
     post_rotate: bool = True
     lr: float = 5e-4
