@@ -207,10 +207,49 @@ def load_data(dataset_name, top_genes, log_transform=True, cell_types=None):
         raise ValueError(f"Unknown dataset name: {dataset_name}")
 
 
-def prepare_data(adata, batchsize, device, dtype, label_key=None, counts=False):
+def prepare_data(adata, batchsize, device, dtype, label_key=None, counts=False, shuffle=True):
     dataset = AdataDataset(adata, label_key=label_key, device=device, dtype=dtype, counts=counts)
-    dataloader = DataLoader(dataset, batch_size=batchsize, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batchsize, shuffle=shuffle)
     return dataset, dataloader
+
+
+def prepare_train_test_data(
+    adata,
+    batchsize,
+    device,
+    dtype,
+    label_key=None,
+    counts=False,
+    test_size=0.2,
+    seed=0,
+):
+    if not 0 < test_size < 1:
+        raise ValueError("test_size must be between 0 and 1.")
+
+    n_obs = adata.n_obs
+    if n_obs < 2:
+        raise ValueError("Need at least two observations to create a train/test split.")
+
+    rng = np.random.default_rng(seed)
+    indices = np.arange(n_obs)
+    rng.shuffle(indices)
+
+    split_idx = int(np.floor((1 - test_size) * n_obs))
+    split_idx = min(max(split_idx, 1), n_obs - 1)
+
+    train_adata = adata[indices[:split_idx]].copy()
+    test_adata = adata[indices[split_idx:]].copy()
+
+    train_dataset = AdataDataset(
+        train_adata, label_key=label_key, device=device, dtype=dtype, counts=counts
+    )
+    test_dataset = AdataDataset(
+        test_adata, label_key=label_key, device=device, dtype=dtype, counts=counts
+    )
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batchsize, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=batchsize, shuffle=False)
+    return train_dataset, train_dataloader, test_dataset, test_dataloader
 
 
 def get_condition_shapes(adata, conditions):
@@ -222,3 +261,27 @@ def get_condition_shapes(adata, conditions):
             n_unique = adata.obs[cond].nunique()
             condition_shapes.append(n_unique)
     return condition_shapes
+
+
+def create_latent_adata(adata, flow, device, dtype=torch.float32):
+    if hasattr(adata.X, "toarray"):
+        X = adata.X.toarray()
+    else:
+        X = adata.X.copy()
+
+    dataset, dataloader = prepare_data(
+        adata, batchsize=1024, device=device, dtype=dtype, shuffle=False
+    )
+
+    z_latent = []
+    for X_batch, _ in dataloader:
+        X_batch = X_batch.to(device)
+        with torch.no_grad():
+            z_batch, _ = flow(X_batch, rev=False)
+        z_latent.append(z_batch.cpu().numpy())
+
+    z_latent = np.concatenate(z_latent, axis=0)
+    latent_adata = adata.copy()
+    latent_adata.X = z_latent.astype("float32")
+
+    return latent_adata
