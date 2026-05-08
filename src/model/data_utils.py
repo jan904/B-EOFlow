@@ -8,6 +8,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
+from sklearn.cluster import KMeans
 
 
 class AdataDataset(Dataset):
@@ -285,3 +286,50 @@ def create_latent_adata(adata, flow, device, dtype=torch.float32):
     latent_adata.X = z_latent.astype("float32")
 
     return latent_adata
+
+
+def build_metacells(
+    adata,
+    group_keys=["cell_type", "cytokine"],
+    use_rep="X_pca",
+    metacells_per_group=200,
+):
+
+    sc.pp.pca(adata, n_comps=50)
+    metacells = []
+    metacell_obs = []
+
+    for group_vals, group_adata in adata.obs.groupby(group_keys):
+        idx = group_adata.index
+        sub = adata[idx]
+
+        if len(sub) < 10:
+            continue
+
+        metacells = min(metacells_per_group, len(sub) // 4)
+        X_rep = sub.obsm[use_rep]
+        labels = KMeans(n_clusters=metacells, random_state=0).fit_predict(X_rep)
+
+        for k in range(metacells):
+            mask = labels == k
+            if mask.sum() < 2:
+                continue
+
+            metacell_x = np.asarray(sub.layers["counts"][mask].sum(axis=0))
+            metacells.append(metacell_x)
+
+            obs_dict = {
+                key: group_vals[i] if isinstance(group_vals, tuple) else group_vals
+                for i, key in enumerate(group_keys)
+            }
+            obs_dict["n_cells"] = mask.sum()
+            metacell_obs.append(obs_dict)
+
+    X = np.vstack(metacells)
+    meta_adata = sc.AnnData(X=X, var=adata.var, obs=pd.DataFrame(metacell_obs))
+
+    meta_adata.layers["counts"] = meta_adata.X.copy()
+    sc.pp.normalize_total(meta_adata, target_sum=1e4)
+    sc.pp.log1p(meta_adata)
+
+    return meta_adata

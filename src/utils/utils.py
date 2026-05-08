@@ -254,3 +254,17 @@ def display_csv(csv_path):
     display(
         df.style.background_gradient(cmap="coolwarm", axis=None, vmin=-1, vmax=1).format("{:.3f}")
     )
+
+
+def filter_xdata(adata, covariates, keys, device):
+
+    mask = np.ones(adata.shape[0], dtype=np.bool)
+    if covariates is not None and keys is not None:
+        for covariate, key in zip(covariates, keys):
+            mask &= adata.obs[covariate] == key
+
+    x_data = adata[mask, :].X
+    x_data = x_data.toarray()
+    x_data = torch.tensor(x_data, dtype=torch.float32, device=device)
+
+    return x_data[:256, :], mask

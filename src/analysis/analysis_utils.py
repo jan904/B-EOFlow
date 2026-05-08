@@ -22,17 +22,13 @@ from src.utils.utils import (
     compute_latent_effect,
     compute_neighbors,
     compute_correlations,
+    filter_xdata,
 )
 from src.model.build_model import get_INN
 import importlib
 import sys
 
 from scipy.stats import skew, kurtosis
-
-try:
-    importlib.reload(sys.modules["src.utils.utils"])
-except KeyError:
-    pass
 
 
 def get_losses_ablation(dir_name, key_position, device):
