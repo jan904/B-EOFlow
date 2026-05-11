@@ -2,6 +2,7 @@ import os
 import gc
 import sys
 import torch
+import scvi
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,24 +19,261 @@ from src.analysis.plotting import (
     plot_loss,
 )
 from src.utils.utils import (
-    compare_pca,
     compute_latent_effect,
     compute_neighbors,
     compute_correlations,
     filter_xdata,
+    augment_with_noise,
+    load_scvi,
 )
 from src.model.build_model import get_INN
-import importlib
+from sklearn.decomposition import PCA
 import sys
 
 from scipy.stats import skew, kurtosis
 
 
-def get_losses_ablation(dir_name, key_position, device):
+class FlowAnalyser:
+    def __init__(
+        self,
+        adata,
+        flow,
+        kwargs_data,
+        labels_key,
+        control_label,
+        plot_dir,
+        csv_dir,
+        checkpoint_path,
+        metrics_loss=None,
+        conditions=None,
+    ):
+        self.adata = adata
+        self.flow = flow
+        self.kwargs_data = kwargs_data
+        self.device = kwargs_data["device"]
+        self.dtype = kwargs_data["dtype"]
+        self.sigma_noise = kwargs_data["sigma_noise"]
+        self.labels_key = labels_key
+        self.control_label = control_label
+        self.plot_dir = plot_dir
+        self.csv_dir = csv_dir
+        self.checkpoint_path = checkpoint_path
+        self.metrics_loss = metrics_loss
+
+        condition_shapes = None
+        if conditions is not None:
+            condition_shapes = get_condition_shapes(adata, conditions)
+        self.condition_shapes = condition_shapes
+        self.conditions = conditions
+
+        self.jac_dec = None
+        self.latent_sort = None
+        self.H_i = None
+        self.H = None
+
+        self.pca = None
+        self.x_pca = None
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        adata,
+        dataset_name,
+        labels_key,
+        control_label,
+        lam_MTC,
+        sigma_noise,
+        prefix="",
+        folder_postfix="",
+        conditions=None,
+        device=None,
+        dtype=torch.float32,
+        batch_size=1024,
+    ):
+        if device == None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        dataset, dataloader = prepare_data(
+            adata,
+            batch_size,
+            device,
+            dtype,
+            label_key=conditions,
+        )
+        D_dim = dataset.X.shape[1]
+        N_dim = D_dim
+
+        model_path, plot_dir, log_dir, csv_dir = FlowAnalyser._build_dirs(
+            dataset_name, lam_MTC, sigma_noise, N_dim, prefix=prefix, folder_postfix=folder_postfix
+        )
+        kwargs_data, kwargs_loss, metrics_loss = FlowAnalyser._build_kwargs(
+            device,
+            dtype,
+            N_dim,
+            D_dim,
+            dataloader,
+            dataset,
+            sigma_noise,
+            lam_MTC,
+        )
+
+        if os.path.exists(model_path):
+            flow, _, metrics_loss = get_INN_from_checkpoint(model_path, device=device)
+        else:
+            raise FileNotFoundError(f"Checkpoint not found at {model_path}")
+
+        if adata.obsm.get("X_scVI_un") is None:
+            load_scvi(adata, dataset_name, N_dim)
+
+        return FlowAnalyser(
+            adata,
+            flow,
+            kwargs_data,
+            labels_key,
+            control_label,
+            plot_dir,
+            csv_dir,
+            metrics_loss=metrics_loss,
+            conditions=conditions,
+            checkpoint_path=model_path,
+        )
+
+    @staticmethod
+    def _build_dirs(dataset_name, lam_MTC, sigma_noise, N_dim, prefix="", folder_postfix=""):
+        model_name = f"{prefix}MTC_{lam_MTC}_sigma_{sigma_noise}_model.pt"
+        output_dir_name = f"{prefix}MTC_{lam_MTC}_sigma_{sigma_noise}"
+
+        base_model_path = os.path.join(
+            "/g/stegle/jhoefer/models/EOFlow",
+            dataset_name,
+            "top_" + str(N_dim) + folder_postfix,
+        )
+        base_output_dir_path = os.path.join(
+            "/home/jhoefer/sandbox/results",
+            dataset_name,
+            "top_" + str(N_dim) + folder_postfix,
+        )
+
+        plot_dir = os.path.join(base_output_dir_path, "plots", output_dir_name)
+        log_dir = os.path.join(base_output_dir_path, "logs", output_dir_name)
+        csv_dir = os.path.join(base_output_dir_path, "csv", output_dir_name)
+        os.makedirs(plot_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(csv_dir, exist_ok=True)
+
+        return os.path.join(base_model_path, model_name), plot_dir, log_dir, csv_dir
+
+    @staticmethod
+    def _build_kwargs(device, dtype, N_dim, D_dim, dataloader, dataset, sigma_noise, lam_MTC):
+        kwargs_data = {
+            "device": device,
+            "dtype": dtype,
+            "N_dim": N_dim,
+            "D_dim": D_dim,
+            "dataloader": dataloader,
+            "data_mean": dataset.X.mean(dim=0),
+            "data_std": torch.ones(D_dim),
+            "sigma_noise": sigma_noise,
+            "sigma_inflate": sigma_noise,
+        }
+
+        kwargs_loss = {
+            "use_NLL": True,
+            "use_MER": True,
+            "mode_MER": "unbiased",  #'full', #'unbiased'
+            "lam_MTC": lam_MTC,
+            "lam_ME_i": list(np.zeros(D_dim)),
+            # 'use_align': False,
+            # 'dims_align': D_dim - 1,
+            # 'lam_align': 1, #0.1,
+            # 'lam_disent': 0, #0.1,
+            "use_rec": False,
+            "dims_rec": D_dim - 1,
+            "lam_rec": 100,  #
+            "sigma_noise": sigma_noise,
+        }
+
+        metrics_loss = {
+            "epoch": [],
+            "loss": [],
+            "z2": [],
+            "NLL": [],
+            "MTC": [],
+            "H_i": [],
+            "H_core": [],
+            "H_detail": [],
+            "MI_core_detail": [],
+            "L2_rec": [],
+        }
+
+        return kwargs_data, kwargs_loss, metrics_loss
+
+    def compute_jacobian(self, x_input=None, calculate_entropy=True, N_samples=256):
+        if x_input is None:
+            idx = torch.randperm(self.adata.X.shape[0])[:N_samples]
+            x_input = torch.tensor(self.adata.X.toarray(), dtype=torch.float32, device=self.device)[
+                idx
+            ]
+            x_input = x_input + torch.randn_like(x_input) * self.sigma_noise
+
+        jac_dec, ljd, z, x = get_jacobian(
+            self.kwargs_data,
+            self.flow,
+            condition_shapes=self.condition_shapes,
+            N_samples=N_samples,
+            print_info=False,
+            x_input=x_input,
+            subtract_mean=False,
+        )
+
+        if calculate_entropy:
+            with torch.no_grad():
+                H_i, H, latent_sort = get_manifold_entropy(
+                    self.kwargs_data,
+                    jac_dec.detach(),
+                    ljd.detach(),
+                    z=z.detach(),
+                    print_info=True,
+                )
+            self.latent_sort = latent_sort
+            self.H_i = H_i
+            self.H = H
+
+        self.jac_dec = jac_dec
+
+    def subset(self, covariates, keys):
+        _, mask = filter_xdata(self.adata, covariates=covariates, keys=keys, device=self.device)
+        return FlowAnalyser(
+            self.adata[mask],
+            self.flow,
+            self.kwargs_data,
+            self.labels_key,
+            self.control_label,
+            self.plot_dir,
+            self.csv_dir,
+            self.checkpoint_path,
+            conditions=self.conditions,
+        )
+
+    def set_enrichment_scores(self, hm_names, hm_acts):
+        self.hm_names = hm_names
+        self.hm_acts = hm_acts
+
+    def set_pca(self, pca, x_pca):
+        self.pca = pca
+        self.x_pca = x_pca
+
+
+def get_losses_ablation(dir_name, key_position, device=None):
+
+    if device == None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     losses = {}
     for model in os.listdir(dir_name):
         print(f"Evalutating model: {model}")
-        loss = get_loss_from_checkpoint(dir_name, model, device)
+        checkpoint_path = os.path.join(dir_name, model)
+        loss = get_loss_from_checkpoint(checkpoint_path, device)
 
         key = ""
         for pos in key_position:
@@ -46,9 +284,9 @@ def get_losses_ablation(dir_name, key_position, device):
     return losses
 
 
-def get_loss_from_checkpoint(model_path, model_name, device, loss_key="loss"):
+def get_loss_from_checkpoint(checkpoint_path, device, loss_key="loss"):
     checkpoint = torch.load(
-        os.path.join(model_path, model_name),
+        checkpoint_path,
         map_location=device,
         weights_only=False,
     )
@@ -60,80 +298,68 @@ def get_loss_from_checkpoint(model_path, model_name, device, loss_key="loss"):
 
 
 def analyze_result(
-    adata,
-    flow,
-    latent_sort,
-    H_i,
-    H,
-    N_dim,
-    metrics_loss,
-    labels_key,
-    conditions=None,
-    plot_dir=None,
-    device="cpu",
+    analyzer,
     log_scale=True,
-    sigma_inflate=None,
     vmax=6,
-    n_latent_factors=3,
+    n_latent_factors=4,
     use_rep="X_scVI_un",
+    computation_batch_size=1024,
 ):
 
-    if plot_dir is not None:
-        os.makedirs(plot_dir, exist_ok=True)
+    if analyzer.plot_dir is not None:
+        os.makedirs(analyzer.plot_dir, exist_ok=True)
 
     # Perform PCA
     latent_sort_pca, adata, X_pca = compare_pca(
-        adata,
+        analyzer,
         n_latent_factors=n_latent_factors,
-        n_components=N_dim,
-        noise_level=sigma_inflate,
     )
 
     # Compute latent effect and add to adata.obs
     adata, latent_distributions = compute_latent_effect(
-        flow,
-        adata,
-        latent_sort,
-        conditions=conditions,
+        analyzer,
         n_latent_factors=n_latent_factors,
-        device=device,
+        batch_size=computation_batch_size,
     )
 
-    pca_data_entropy, flow_data_entropy = compare_data_entropy(N_dim, latent_sort_pca, H)
+    pca_data_entropy, flow_data_entropy = compare_data_entropy(analyzer, latent_sort_pca)
 
     # Compare ME spectrum to PCA spectrum
     compare_spectra(
-        latent_sort,
-        H_i,
+        analyzer,
         latent_sort_pca,
         pca_data_entropy,
         flow_data_entropy,
         log_scale=log_scale,
-        plot_dir=plot_dir,
-        sigma_inflate=sigma_inflate,
     )
 
     # Compute neighbor graph and UMAP using the specified representation (default: "X_scVI_un")
-    adata = compute_neighbors(adata, use_rep=use_rep)
+    adata = compute_neighbors(analyzer.adata, use_rep=use_rep)
+    analyzer.adata = adata
 
     # Plot data colored by condition and cell type
-    plot_umap(adata, color=[f"{labels_key}", "cell_type"], plot_dir=plot_dir)
+    plot_umap(
+        analyzer.adata, color=[f"{analyzer.labels_key}", "cell_type"], plot_dir=analyzer.plot_dir
+    )
 
     # Plot data colored by latent effect of EOFlow and PCA
     compare_latent_effects(
-        adata,
-        latent_sort,
-        plot_dir=plot_dir,
+        analyzer.adata,
+        analyzer.latent_sort,
+        plot_dir=analyzer.plot_dir,
         n_latent_factors=n_latent_factors,
         vmax=vmax,
     )
 
     # Plot Histogram of latent distributions
-    plot_hist(latent_distributions, X_pca=X_pca, plot_dir=plot_dir)
+    plot_hist(latent_distributions, X_pca=X_pca, plot_dir=analyzer.plot_dir)
+
+    if analyzer.metrics_loss is None:
+        losses = get_loss_from_checkpoint(analyzer.checkpoint_path, device=analyzer.device)
 
     fig, ax = plt.subplots(figsize=(10, 6))
     plot_loss(
-        metrics_loss["loss"],
+        analyzer.metrics_loss["loss"],
         "loss",
         filter_lim=3,
         filter_N=50,
@@ -149,159 +375,56 @@ def analyze_result(
         linestyle="solid",
         plot_smooth=True,
         ax=ax,
-        plot_dir=plot_dir,
+        plot_dir=analyzer.plot_dir,
     )
 
 
 def analyze_model(
     adata,
-    model_path,
-    output_dir_path,
-    device,
-    dtype,
+    dataset_name,
     labels_key,
-    sigma_noise=0.8,
-    lam_MTC=1.0,
-    N_blocks=12,
-    use_counts=False,
+    control_label,
+    lam_MTC,
+    sigma_noise,
+    device=None,
+    dtype=None,
+    prefix="",
+    folder_postfix="",
     conditions=None,
     batch_size=512,
     umaps=True,
     MPMI=True,
     correlations=True,
-    prefix=None,
-    pre_normalize=False,
-    N_samples=256,
 ):
-    model_name = "MTC_" + str(lam_MTC) + "_sigma_" + str(sigma_noise) + "_model.pt"
-    output_dir_name = "MTC_" + str(lam_MTC) + "_sigma_" + str(sigma_noise)
 
-    if prefix is not None:
-        model_name = prefix + "_" + model_name
-        output_dir_name = prefix + "_" + output_dir_name
-
-    if use_counts:
-        model_path += "_counts"
-        output_dir_path += "_counts"
-
-    if conditions is not None:
-        model_path += "_cond"
-        output_dir_path += "_cond"
-
-    # model_path += "_ablation"
-    # output_dir_path += "_ablation"
-    print(f"Model: {model_name}")
-
-    plot_dir = os.path.join(output_dir_path, "plots", output_dir_name)
-    log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
-    csv_dir = os.path.join(output_dir_path, "csv", output_dir_name)
-    os.makedirs(plot_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(csv_dir, exist_ok=True)
-
-    condition_shapes = None
-    if conditions is not None:
-        condition_shapes = get_condition_shapes(adata, conditions)
-
-    dataset, dataloader = prepare_data(
+    analyzer = FlowAnalyser.from_checkpoint(
         adata,
-        batch_size,
-        device,
-        dtype,
-        counts=use_counts,
-        label_key=conditions,
-    )
-    D_dim = dataset.X.shape[1]
-    N_dim = D_dim
-
-    kwargs_data = {
-        "device": device,
-        "dtype": dtype,
-        "N_dim": N_dim,
-        "D_dim": D_dim,
-        "dataloader": dataloader,
-        "data_mean": dataset.X.mean(dim=0),
-        "data_std": torch.ones(D_dim),
-        "sigma_noise": sigma_noise,
-        "sigma_inflate": sigma_noise,
-    }
-
-    kwargs_loss = {
-        "use_NLL": True,
-        "use_MER": True,
-        "mode_MER": "unbiased",
-        "lam_MTC": lam_MTC,
-        "lam_ME_i": list(np.zeros(D_dim)),
-        "use_rec": False,
-        "dims_rec": D_dim - 1,
-        "lam_rec": 100,  #
-        "sigma_noise": sigma_noise,
-    }
-
-    metrics_loss = {
-        "epoch": [],
-        "loss": [],
-        "z2": [],
-        "NLL": [],
-        "MTC": [],
-        "H_i": [],
-        "H_core": [],
-        "H_detail": [],
-        "MI_core_detail": [],
-        "L2_rec": [],
-    }
-
-    flow, optimizer_flow, metrics_loss = get_INN_from_checkpoint(
-        model_dir=model_path,
-        model_name=model_name,
+        dataset_name,
+        labels_key,
+        control_label,
+        lam_MTC,
+        sigma_noise,
+        prefix=prefix,
+        folder_postfix=folder_postfix,
+        conditions=conditions,
         device=device,
+        dtype=dtype,
+        batch_size=batch_size,
     )
-
-    idx = torch.randperm(adata.X.shape[0])[:N_samples]
-    x_input = torch.tensor(adata.X.toarray(), dtype=torch.float32, device=device)[idx]
-    x_input = x_input + torch.randn_like(x_input) * sigma_noise
-
-    jac_dec, ljd, z, x = get_jacobian(
-        kwargs_data,
-        flow,
-        condition_shapes=condition_shapes,
-        N_samples=N_samples,
-        print_info=False,
-        x_input=x_input,
-        subtract_mean=False,
-    )
-
-    with torch.no_grad():
-        H_i, H, latent_sort = get_manifold_entropy(
-            kwargs_data, jac_dec.detach(), ljd.detach(), z=z.detach(), print_info=True
-        )
+    analyzer.compute_jacobian()
 
     if umaps:
         analyze_result(
-            adata,
-            flow,
-            latent_sort,
-            H_i,
-            H,
-            N_dim,
-            metrics_loss,
-            labels_key=labels_key,
-            conditions=conditions,
-            plot_dir=plot_dir,
-            device=device,
+            analyzer,
             log_scale=False,
-            sigma_inflate=kwargs_data["sigma_inflate"],
-            n_latent_factors=8,
             vmax=2,
+            n_latent_factors=8,
+            computation_batch_size=1024,
         )
 
     if correlations:
         correlations = compute_correlations(
-            adata,
-            flow,
-            latent_sort=latent_sort[:9],
-            device=device,
-            condition=conditions if conditions is not None else None,
+            analyzer,
             label_keys=[f"{labels_key}", "cell_type"],
         )
 
@@ -311,15 +434,15 @@ def analyze_model(
                 for latent, values in correlations.items()
             }
         )
-        df.to_csv(os.path.join(csv_dir, "correlations.csv"))
+        df.to_csv(os.path.join(analyzer.csv_dir, "correlations.csv"))
         df.style.background_gradient(cmap="coolwarm", axis=None, vmin=-1, vmax=1).format("{:.3f}")
 
     if MPMI:
-        max_dim = min(50, kwargs_data["N_dim"])
+        max_dim = min(50, analyzer.kwargs_data["N_dim"])
         MPMI_flow = get_MPMI(
-            kwargs_data,
-            jac_dec[:, latent_sort],
-            jac_dec[:, latent_sort],
+            analyzer.kwargs_data,
+            analyzer.jac_dec[:, analyzer.latent_sort],
+            analyzer.jac_dec[:, analyzer.latent_sort],
             max_dim=max_dim,
             dtype=torch.float64,
             device="cpu",
@@ -334,19 +457,17 @@ def analyze_model(
             title=f"MPMI of flow",
             dim_label="latent dim",
             figsize=8,
-            save_dir=plot_dir,
+            save_dir=analyzer.plot_dir,
         )
 
-    return H_i.detach().cpu(), latent_sort.cpu()
+    return analyzer.H_i, analyzer.latent_sort
 
 
 def get_INN_from_checkpoint(
-    model_dir,
-    model_name,
+    checkpoint_path,
     device,
 ):
 
-    checkpoint_path = os.path.join(model_dir, model_name)
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
@@ -368,136 +489,72 @@ def get_INN_from_checkpoint(
     return flow, optimizer_flow, metrics_loss
 
 
-def get_ME_spectra_ablation(adata, dir_name, device, dtype, labels_key, use_counts=False):
-    H_is = {}
-    latent_sorts = {}
-
-    for model in os.listdir(dir_name):
-        print(f"Evalutating model: {model}")
-        model_path = os.path.join(dir_name, model)
-
-        corrected_name = model[1:]
-        lambda_MTC = corrected_name.split("_")[1]
-        sigma_noise = corrected_name.split("_")[3]
-
-        if sigma_noise not in H_is:
-            H_is[sigma_noise] = {}
-            latent_sorts[sigma_noise] = {}
-
-        H_i, latent_sort = analyze_model(
-            adata,
-            dir_name,
-            "/home/jhoefer/sandbox/results",
-            device,
-            dtype,
-            labels_key=labels_key,
-            sigma_noise=float(sigma_noise),
-            lam_MTC=float(lambda_MTC),
-            use_counts=use_counts,
-            umaps=False,
-            MPMI=False,
-            correlations=False,
-            pre_normalize=False,
-            prefix="",
-        )
-        H_is[sigma_noise][lambda_MTC] = H_i
-        latent_sorts[sigma_noise][lambda_MTC] = latent_sort
-
-    return H_is, latent_sorts
-
-
 def return_bottleneck_representation(
-    adata,
-    model_dir,
-    device,
-    dtype,
-    sigma_noise,
-    lam_MTC,
-    N_dim=2000,
+    analyzer=None,
+    adata=None,
+    dataset_name=None,
+    labels_key=None,
+    control_label=None,
+    device=None,
+    dtype=None,
+    sigma_noise=None,
+    lam_MTC=None,
     conditions=None,
-    bottleneck_dim=100,
-    N_samples=256,
     prefix="",
+    folder_postfix="",
+    bottleneck_dim=100,
 ):
-    if conditions is not None:
-        model_name = (
-            conditions[0]
-            + prefix
-            + "_MTC_"
-            + str(lam_MTC)
-            + "_sigma_"
-            + str(sigma_noise)
-            + "_model.pt"
+
+    if analyzer is None:
+        required = [adata, dataset_name, labels_key, control_label, lam_MTC, sigma_noise]
+        if any(arg is None for arg in required):
+            raise ValueError(
+                "Must provide either analyzer or all of: adata, dataset_name, labels_key, control_label, lam_MTC, sigma_noise"
+            )
+        analyzer = FlowAnalyser.from_checkpoint(
+            adata,
+            dataset_name,
+            labels_key,
+            control_label,
+            lam_MTC,
+            sigma_noise,
+            prefix=prefix,
+            folder_postfix=folder_postfix,
+            conditions=conditions,
+            device=device,
+            dtype=dtype,
+            batch_size=1024,
         )
-    else:
-        model_name = prefix + "MTC_" + str(lam_MTC) + "_sigma_" + str(sigma_noise) + "_model.pt"
-
-    D_dim = N_dim
-
-    dataset = AdataDataset(adata, label_key=conditions)
-    dataloader = DataLoader(dataset, batch_size=2048, shuffle=False)
-
-    condition_shapes = get_condition_shapes(adata, conditions) if conditions is not None else None
-    flow, _, _ = get_INN_from_checkpoint(
-        model_dir,
-        model_name,
-        device=device,
-    )
-
-    kwargs_data = {
-        "device": device,
-        "dtype": dtype,
-        "N_dim": N_dim,
-        "D_dim": D_dim,
-        "dataloader": dataloader,
-        "data_mean": dataset.X.mean(dim=0),
-        "data_std": dataset.X.std(dim=0),
-        "sigma_noise": sigma_noise,
-        "sigma_inflate": sigma_noise,
-    }
 
     latent_representation = []
+    dataloader = analyzer.kwargs_data["dataloader"]
     for x, c in dataloader:
         if conditions is not None and c != -1:
-            c = [cond.to(device=device, dtype=dtype) for cond in c]
+            c = [cond.to(device=analyzer.device, dtype=analyzer.dtype) for cond in c]
         else:
             c = None
-        x = torch.tensor(x, device=device, dtype=dtype)
+        x = torch.tensor(x, device=analyzer.device, dtype=analyzer.dtype)
 
-        z, _ = flow(x, c=c, rev=False)
+        z, _ = analyzer.flow(x, c=c, rev=False)
         latent_representation.append(z.cpu().detach().numpy())
     latent_representation = np.concatenate(latent_representation, axis=0)
 
-    condition_shapes = None
-    if conditions is not None:
-        condition_shapes = get_condition_shapes(adata, conditions)
+    if analyzer.jac_dec == None:
+        analyzer.compute_jacobian()
 
-    idx = torch.randperm(adata.X.shape[0])[:N_samples]
-    x_input = torch.tensor(adata.X.toarray(), dtype=torch.float32, device=device)[idx]
-    x_input = x_input + torch.randn_like(x_input) * sigma_noise
-
-    jac_dec, ljd, z, x = get_jacobian(
-        kwargs_data,
-        flow,
-        condition_shapes=condition_shapes,
-        N_samples=N_samples,
-        print_info=False,
-        x_input=x_input,
-        subtract_mean=False,
-    )
-
-    with torch.no_grad():
-        H_i, H, latent_sort = get_manifold_entropy(
-            kwargs_data, jac_dec.detach(), ljd.detach(), z=z.detach(), print_info=True
-        )
-
-    latent_bottleneck_representation = latent_representation[:, latent_sort[:bottleneck_dim]]
-    return latent_bottleneck_representation, latent_sort
+    latent_bottleneck_representation = latent_representation[
+        :, analyzer.latent_sort[:bottleneck_dim]
+    ]
+    return latent_bottleneck_representation, analyzer.latent_sort
 
 
-def compare_data_entropy(N_dim, pca_variance, H):
-    H_pca = 1 / 2 * (N_dim + np.log(pca_variance).sum())
-    H_flow = H.mean()
+def compare_data_entropy(analyzer, pca_variance):
+
+    if analyzer.H is None:
+        analyzer.calculate_jacobian()
+
+    H_pca = 1 / 2 * (analyzer.adata.n_vars + np.log(pca_variance).sum())
+    H_flow = analyzer.H.mean()
     return H_pca, H_flow
 
 
@@ -544,3 +601,51 @@ def test_latent_shape(
     if plot_dir is not None:
         plt.savefig(os.path.join(plot_dir, "latent_distribution_shapes.png"))
     plt.show()
+
+
+def calculate_pca(adata, sigma_noise, n_noise_levels=1, n_components=None):
+    if hasattr(adata.X, "toarray"):
+        X = adata.X.toarray()
+    else:
+        X = adata.X.copy()
+
+    noise_levels = (
+        [sigma_noise / x for x in range(1, n_noise_levels + 1)] if sigma_noise > 0 else []
+    )
+    X_augmented = augment_with_noise(X, noise_levels=noise_levels)
+
+    pca = PCA(n_components=n_components)
+    X_pca = pca.fit_transform(X_augmented)
+
+    return pca, X_pca
+
+
+def compare_pca(analyzer, n_latent_factors=1, n_components=None, n_noise_levels=1):
+    if analyzer.pca is None or analyzer.x_pca is None:
+        pca, x_pca = calculate_pca(
+            analyzer.adata,
+            analyzer.sigma_noise,
+            n_noise_levels=n_noise_levels,
+            n_components=n_components,
+        )
+        analyzer.set_pca(pca, x_pca)
+
+    # Store each component in adata.obs
+    for k in range(n_latent_factors):
+        analyzer.adata.obs[f"pca_{k}"] = analyzer.x_pca[: analyzer.adata.n_obs, k]
+
+    return analyzer.pca.explained_variance_, analyzer.adata, analyzer.x_pca
+
+
+def check_analyzer_params(
+    analyzer, dataset_name, lam_MTC, sigma_noise, N_dim, prefix="", folder_postfix=""
+):
+    """Check if analyzer was initialized with these parameters."""
+    if analyzer is None:
+        return False
+
+    expected_path, _, _, _ = FlowAnalyser._build_dirs(
+        dataset_name, lam_MTC, sigma_noise, N_dim, prefix=prefix, folder_postfix=folder_postfix
+    )
+
+    return analyzer.checkpoint_path == expected_path

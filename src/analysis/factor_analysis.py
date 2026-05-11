@@ -8,6 +8,9 @@ import os
 
 from src.utils.utils import filter_xdata
 from src.analysis.me_metrics import get_jacobian
+from src.analysis.analysis_utils import (
+    calculate_pca,
+)
 
 
 def get_gene_importances(jac_dec, top_k=10, location=None):
@@ -184,7 +187,11 @@ def pca_plot_factors_grid(top_genes, factor_indices, gene_names, top_k=10, n_col
 def pca_get_gene_importances(analyzer, noise_level, top_k=10):
 
     if analyzer.pca == None or analyzer.x_pca is None:
-        analyzer.calculate_pca()
+        pca, x_pca = calculate_pca(
+            analyzer.adata,
+            analyzer.sigma_noise,
+        )
+        analyzer.set_pca(pca, x_pca)
 
     latent_order = np.argsort(analyzer.pca.explained_variance_)[::-1]
 

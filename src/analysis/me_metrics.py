@@ -89,15 +89,23 @@ def get_jacobian(
 
 
 def get_MPMI(
-    kwargs_data,
-    jac_dec_1,
-    jac_dec_2,
+    analyzer1,
+    analyzer2=None,
     max_dim=None,
     dtype=torch.float64,
     device="cpu",
     take_mean=False,
     print_info=False,
 ):
+
+    jac_dec_1 = analyzer1.jac_dec
+    if analyzer2 is None:
+        jac_dec_2 = jac_dec_1
+    else:
+        jac_dec_2 = analyzer2.jac_dec
+
+    kwargs_data = analyzer1.kwargs_data
+
     N_samples = jac_dec_1.shape[0]
     N_dim = kwargs_data["N_dim"]
 

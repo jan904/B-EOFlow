@@ -142,24 +142,21 @@ def plot_PCA_spectrum(
 
 
 def compare_spectra(
-    latent_sort,
-    H_i,
+    analyzer,
     pca_explained_variance_,
     pca_data_entropy,
     flow_data_entropy,
-    plot_dir=None,
     plot_name="spectra",
     log_scale=True,
-    sigma_inflate=None,
 ):
 
     fig, ax = plt.subplots(1, 1, figsize=(14, 5))
 
     plot_ME_spectrum(
-        H_i.detach().cpu(),
-        latent_sort=latent_sort.cpu(),
+        analyzer.H_i.detach().cpu(),
+        latent_sort=analyzer.latent_sort.cpu(),
         log_scale=log_scale,
-        sigma_noise=sigma_inflate,
+        sigma_noise=analyzer.sigma_noise,
         names=[f"EOFlow. Entropy: {flow_data_entropy:.2f}"],
         title=f"",
         figsize=5,
@@ -168,7 +165,7 @@ def compare_spectra(
     plot_PCA_spectrum(
         pca_explained_variance_,
         log_scale=log_scale,
-        sigma_noise=sigma_inflate,
+        sigma_noise=analyzer.sigma_noise,
         names=[f"PCA. Entropy: {pca_data_entropy:.2f}"],
         title=f"",
         figsize=5,
@@ -178,8 +175,8 @@ def compare_spectra(
     plt.title("Manifold Entropy Spectra of EOFlow and PCA")
     plt.tight_layout()
 
-    if plot_dir is not None:
-        plt.savefig(os.path.join(plot_dir, plot_name))
+    if analyzer.plot_dir is not None:
+        plt.savefig(os.path.join(analyzer.plot_dir, plot_name))
 
     plt.show()
 
@@ -412,3 +409,85 @@ def plot_gauss_filter(x, filter_lim, filter_N, extrapolate=False):
         gaussian(np.linspace(-filter_lim, filter_lim, filter_N))
         / np.sum(gaussian(np.linspace(-filter_lim, filter_lim, filter_N))),
     )[min:max]
+
+
+def plot_correlation_distribution(
+    correlations,
+    latent_sort,
+    filter_quantile=0.99,
+    title="Correlation distribution per label",
+):
+    df = pd.DataFrame(
+        {latent: dict(values) for latent, values in correlations.items()}
+    ).T  # shape: (num_latents, num_labels)
+
+    # Add sum across all latents per label
+    df.loc["sum"] = (df**2).sum()
+
+    num_labels = df.shape[1]
+    ncols = 4
+    nrows = int(np.ceil(num_labels / ncols))
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3))
+    axes = axes.flatten()
+
+    for i, col in enumerate(df.columns):
+        ax = axes[i]
+        vals = df[col].drop("sum").dropna()
+
+        idx = vals.abs().idxmax()
+        idx_num = int(idx.split("_")[1])
+        position = (latent_sort == idx_num).nonzero(as_tuple=True)[0].item()
+
+        # Filter by quantile around origin
+        threshold = vals.abs().quantile(filter_quantile)  # adjust quantile as needed
+        vals_filtered = vals[vals.abs() > threshold]
+        total = df.loc["sum", col]
+
+        sns.histplot(
+            vals_filtered,
+            ax=ax,
+            kde=False,
+            bins=30,
+            color="steelblue",
+            log_scale=(False, False),
+        )
+        ax.axvline(
+            vals.mean(),
+            color="red",
+            linestyle="--",
+            linewidth=1,
+            label=f"mean={vals.mean():.2f}",
+        )
+
+        # Highlight filtered-out region around origin
+        ax.axvspan(
+            -threshold,
+            threshold,
+            alpha=0.15,
+            color="gray",
+            label=f"filtered |r|<{threshold:.3f}",
+        )
+        ax.axvline(-threshold, color="gray", linestyle=":", linewidth=1)
+        ax.axvline(threshold, color="gray", linestyle=":", linewidth=1)
+        ax.set_title(f"{col} | Top: latent_{position} (corr={vals[idx]:.2f})", fontsize=10)
+        ax.set_xlabel("Correlation")
+        ax.set_ylabel("Count")
+        ax.text(
+            0.97,
+            0.97,
+            f"sum={total:.2f}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightyellow", edgecolor="gray"),
+        )
+        ax.legend(fontsize=8)
+
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+
+    fig.suptitle(title, fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()

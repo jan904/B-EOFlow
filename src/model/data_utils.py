@@ -199,13 +199,22 @@ def load_kang_data(top_genes, log_transform=True):
 
 def load_data(dataset_name, top_genes, log_transform=True, cell_types=None):
     if dataset_name == "kang":
-        return load_kang_data(top_genes=top_genes, log_transform=log_transform)
+        adata, labels_key, control_label = load_kang_data(
+            top_genes=top_genes, log_transform=log_transform
+        )
     elif dataset_name == "parse":
-        return load_parse_data(
+        adata, labels_key, control_label = load_parse_data(
             top_genes=top_genes, log_transform=log_transform, cell_types=cell_types
         )
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
+    adata.uns["load_params"] = {
+        "dataset_name": dataset_name,
+        "top_genes": top_genes,
+        "log_transform": log_transform,
+        "cell_types": cell_types,
+    }
+    return adata, labels_key, control_label
 
 
 def prepare_data(adata, batchsize, device, dtype, label_key=None, counts=False, shuffle=True):
@@ -306,11 +315,11 @@ def build_metacells(
         if len(sub) < 10:
             continue
 
-        metacells = min(metacells_per_group, len(sub) // 4)
+        num_metacells = min(metacells_per_group, len(sub) // 4)
         X_rep = sub.obsm[use_rep]
-        labels = KMeans(n_clusters=metacells, random_state=0).fit_predict(X_rep)
+        labels = KMeans(n_clusters=num_metacells, random_state=0).fit_predict(X_rep)
 
-        for k in range(metacells):
+        for k in range(num_metacells):
             mask = labels == k
             if mask.sum() < 2:
                 continue

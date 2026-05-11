@@ -14,8 +14,7 @@ import pandas as pd
 from collections import defaultdict
 from IPython.display import display
 
-import importlib
-import sys
+import scvi
 
 # importlib.reload(sys.modules["src.utils.plotting"])
 from src.analysis.plotting import (
@@ -36,56 +35,37 @@ def augment_with_noise(X, noise_levels):
     return np.concatenate(X_augmented, axis=0)
 
 
-def compare_pca(adata, n_latent_factors=1, n_components=None, noise_level=0):
-    if hasattr(adata.X, "toarray"):
-        X = adata.X.toarray()
-    else:
-        X = adata.X.copy()
+def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1):
 
-    noise_levels = [noise_level / x for x in [1, 2, 4, 8]] if noise_level > 0 else []
-    X_augmented = augment_with_noise(X, noise_levels)
-
-    # Fit PCA
-    pca = PCA(n_components=n_components)
-    X_pca = pca.fit_transform(X_augmented)  # shape: [n_cells, n_latent_factors]
-
-    # Store each component in adata.obs
-    for k in range(n_latent_factors):
-        adata.obs[f"pca_{k}"] = X_pca[: adata.n_obs, k]
-
-    return pca.explained_variance_, adata, X_pca
-
-
-def compute_latent_effect(
-    flow, adata, latent_sort, conditions=None, batch_size=256, n_latent_factors=1, device="cpu"
-):
+    if analyzer.latent_sort is None:
+        analyzer.compute_jacobian()
 
     latent_distributions = []
     for k in tqdm.tqdm(range(n_latent_factors)):
         effects = []
-        for i in range(0, adata.X.shape[0], batch_size):
-            X_batch = adata.X[i : i + batch_size]
+        for i in range(0, analyzer.adata.X.shape[0], batch_size):
+            X_batch = analyzer.adata.X[i : i + batch_size]
             if hasattr(X_batch, "toarray"):
                 X_batch = X_batch.toarray()
-            X_batch = torch.tensor(X_batch, dtype=torch.float32).to(device)
-            if conditions is not None:
-                cat = pd.Categorical(adata.obs[conditions[0]][i : i + batch_size])
+            X_batch = torch.tensor(X_batch, dtype=torch.float32).to(analyzer.device)
+            if analyzer.conditions is not None:
+                cat = pd.Categorical(analyzer.adata.obs[analyzer.conditions[0]][i : i + batch_size])
                 codes = torch.tensor(cat.codes, dtype=torch.long)
-                cond_batch = [F.one_hot(codes, num_classes=len(cat.categories)).to(device)]
+                cond_batch = [F.one_hot(codes, num_classes=len(cat.categories)).to(analyzer.device)]
             else:
                 cond_batch = None
 
             with torch.no_grad():
-                z, _ = flow(X_batch, c=cond_batch, rev=False)
-                z_effect = z[:, latent_sort[k]].clone()
+                z, _ = analyzer.flow(X_batch, c=cond_batch, rev=False)
+                z_effect = z[:, analyzer.latent_sort[k]].clone()
 
             effects.append(z_effect.cpu())
 
         latent_effect = torch.cat(effects, dim=0)
         if n_latent_factors < 16:
-            adata.obs[f"latent_{ latent_sort[k]}_signed"] = latent_effect.numpy()
+            analyzer.adata.obs[f"latent_{ analyzer.latent_sort[k]}_signed"] = latent_effect.numpy()
         latent_distributions.append(latent_effect)
-    return adata, latent_distributions
+    return analyzer.adata, latent_distributions
 
 
 def compute_TC(H_i, H, latent_sort, N_dim):
@@ -212,32 +192,32 @@ def latent_correlation_with_label(z_dim, adata, label_key):
 
 
 def compute_correlations(
-    adata,
-    flow,
-    latent_sort,
-    device,
-    dtype=torch.float32,
-    condition=None,
+    analyzer,
+    n_latents=None,
     label_keys=["condition", "cell_type"],
 ):
-    dataset = AdataDataset(adata, label_key=condition, device=device)
-    dataloader = DataLoader(dataset, batch_size=adata.X.shape[0], shuffle=False)
+
+    if n_latents is None:
+        n_latents = len(analyzer.latent_sort)
+
+    dataset = AdataDataset(analyzer.adata, label_key=analyzer.conditions, device=analyzer.device)
+    dataloader = DataLoader(dataset, batch_size=analyzer.adata.X.shape[0], shuffle=False)
 
     with torch.no_grad():
         for x, c in dataloader:
-            x = x.clone().detach().to(device=device, dtype=dtype)
-            if condition is not None and c != -1:
-                c = [cond.to(device=device, dtype=dtype) for cond in c]
+            x = x.clone().detach().to(device=analyzer.device, dtype=analyzer.dtype)
+            if analyzer.conditions is not None and c != -1:
+                c = [cond.to(device=analyzer.device, dtype=analyzer.dtype) for cond in c]
             else:
                 c = None
-            z, _ = flow(x, c=c, rev=False)
+            z, _ = analyzer.flow(x, c=c, rev=False)
             correlations = {}
-            for k in range(len(latent_sort)):
-                z_dim = z[:, latent_sort[k]]
-                correlations[f"latent_{latent_sort[k]}"] = []
+            for k in range(n_latents):
+                z_dim = z[:, analyzer.latent_sort[k]]
+                correlations[f"latent_{analyzer.latent_sort[k]}"] = []
                 for label_key in label_keys:
-                    corr = latent_correlation_with_label(z_dim.cpu(), adata, label_key)
-                    correlations[f"latent_{latent_sort[k]}"].extend(corr)
+                    corr = latent_correlation_with_label(z_dim.cpu(), analyzer.adata, label_key)
+                    correlations[f"latent_{analyzer.latent_sort[k]}"].extend(corr)
     return correlations
 
 
@@ -268,3 +248,44 @@ def filter_xdata(adata, covariates, keys, device):
     x_data = torch.tensor(x_data, dtype=torch.float32, device=device)
 
     return x_data[:256, :], mask
+
+
+def load_scvi(adata, dataset_name, N_dim):
+
+    if adata.obsm.get("X_scVI_un") is not None:
+        return
+
+    model_dir_unsupervised = os.path.join("/home/jhoefer/sandbox/models", "scvi_model_unsupervised")
+    model_name = f"{dataset_name}_{N_dim}_model.pt"
+
+    checkpoint_exists_unsupervised = os.path.exists(
+        os.path.join(model_dir_unsupervised, model_name)
+    )
+
+    if not checkpoint_exists_unsupervised:
+        raise FileNotFoundError(f"Checkpoint not found at {model_dir_unsupervised}")
+    else:
+        scvi_model_unsupervised = scvi.model.SCVI.load(
+            model_dir_unsupervised,
+            adata=adata,
+            prefix=f"{dataset_name}_{N_dim}_",
+        )
+
+    SCVI_LATENT_KEY_UNSUPERVISED = "X_scVI_un"
+
+    Z_scvi_unsupervised = scvi_model_unsupervised.get_latent_representation()
+    adata.obsm[SCVI_LATENT_KEY_UNSUPERVISED] = Z_scvi_unsupervised
+
+
+def check_adata_params(adata, dataset_name, top_genes, log_transform=True, cell_types=None):
+    """Check if adata was loaded with these parameters."""
+    if "load_params" not in adata.uns:
+        return False
+
+    params = adata.uns["load_params"]
+    return (
+        params["dataset_name"] == dataset_name
+        and params["top_genes"] == top_genes
+        and params["log_transform"] == log_transform
+        and params["cell_types"] == cell_types
+    )
