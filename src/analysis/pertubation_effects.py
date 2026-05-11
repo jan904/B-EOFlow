@@ -59,7 +59,7 @@ def evaluate_de_effects_gt(analyzer, pertubations, de_dfs, de_sig_dfs):
     return de_dfs, de_sig_dfs
 
 
-def evaluate_de_effects(analyzer, pertubations, keep_dims, batch_size=1024):
+def evaluate_de_effects(analyzer, pertubations, keep_dims, use_noise=True, batch_size=1024):
 
     de_dfs = {}
     de_sig_dfs = {}
@@ -86,7 +86,9 @@ def evaluate_de_effects(analyzer, pertubations, keep_dims, batch_size=1024):
         x = []
         for x_batch, y_batch in dataloader:
             x_batch = x_batch.to(device=analyzer.device, dtype=analyzer.dtype)
-            x_batch = x_batch + torch.randn_like(x_batch) * analyzer.sigma_noise
+
+            if use_noise:
+                x_batch = x_batch + torch.randn_like(x_batch) * analyzer.sigma_noise
 
             with torch.no_grad():
                 z_batch, _ = analyzer.flow(x_batch, rev=False)

@@ -24,6 +24,7 @@ def train_INN(
     kwargs_loss,
     save_model_path,
     model_config,
+    val_metrics_loss=None,
     start_epoch=0,
     num_epochs=1,
     print_info=True,
@@ -46,8 +47,8 @@ def train_INN(
     device = kwargs_data["device"]
     dtype = kwargs_data["dtype"]
 
-    dataloader = kwargs_data["dataloader"]
-    N_batches = len(dataloader)
+    train_dataloader = kwargs_data["train_dataloader"]
+    N_batches = len(train_dataloader)
     data_mean = (
         kwargs_data.get("data_mean", torch.zeros(kwargs_data["N_dim"]))
         .to(device=device)
@@ -61,6 +62,16 @@ def train_INN(
         .unsqueeze(0)
     )
 
+    validation = False
+    if kwargs_data["test_dataloader"] is not None:
+        test_dataloader = kwargs_data["test_dataloader"]
+        validation = True
+        val_losses = losses.copy() if val_metrics_loss is None else val_metrics_loss
+
+        best_val_loss = float("inf")
+        batch_val_losses = []
+        mean_val_loss = float("inf")
+
     print(f"Sigma noise: {kwargs_loss['sigma_noise']}")
     sigma_noise = kwargs_loss["sigma_noise"]
     logger.info(model_config)
@@ -71,7 +82,7 @@ def train_INN(
             logger.info(f"Using raw counts: {use_counts}")
         else:
             logger.info(
-                f"Starting training for {num_epochs} epochs with batch size {dataloader.batch_size}."
+                f"Starting training for {num_epochs} epochs with batch size {train_dataloader.batch_size}."
             )
             logger.info("")
             logger.info(f"Setup:")
@@ -121,7 +132,7 @@ def train_INN(
 
     times = []
     for epoch in info_func(range(start_epoch, start_epoch + num_epochs)):
-        for i_batch, (x, c) in enumerate(dataloader):
+        for i_batch, (x, c) in enumerate(train_dataloader):
             start_ = time.time()
             optimizer.zero_grad()
 
@@ -268,37 +279,125 @@ def train_INN(
             t5 = time.time() - start
             full_time = time.time() - start_
 
-            print(
-                f"Time for epoch {epoch}: {full_time:.4f} seconds (T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f})"
-            )
+            # print(
+            #     f"Time for epoch {epoch}: {full_time:.4f} seconds (T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f})"
+            # )
 
-        if epoch % 50 == 0:
-            checkpoint = {
-                "epoch": epoch,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "metrics_loss": losses,
-                "log_path": log_path,
-                "counts": use_counts,
-                "conditions": conditions,
-                "model_config": model_config,
-            }
-            torch.save(checkpoint, save_model_path)
-            logger.info("Saving checkpoint to " + save_model_path)
+        if validation:
+            model.eval()
+            with torch.no_grad():
+                for i_batch, (x_val, c_val) in enumerate(test_dataloader):
+                    if conditions is not None and c_val != -1:
+                        c_val = [cond.to(device=device, dtype=dtype) for cond in c_val]
+                    else:
+                        c_val = None
 
-    checkpoint = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "metrics_loss": losses,
-        "log_path": log_path,
-        "counts": use_counts,
-        "conditions": conditions,
-        "model_config": model_config,
-    }
-    torch.save(checkpoint, save_model_path)
-    logger.info("Finished training. Saving model to " + save_model_path)
+                    if not isinstance(x_val, torch.Tensor) and not isinstance(x_val, torch.tensor):
+                        x_val = torch.tensor(x_val, device=device, dtype=dtype)
+                    else:
+                        x_val = x_val.clone().detach().to(device=device, dtype=dtype)
+
+                    x_val = x_val + torch.randn_like(x_val) * sigma_noise
+                    val_loss, val_metrics = get_loss(
+                        model,
+                        x_val,
+                        kwargs_data,
+                        kwargs_loss,
+                        sampler,
+                        c=c_val,
+                        metrics_last=metrics_last,
+                    )
+
+                    if torch.isnan(val_loss):
+                        raise ValueError("Validation Loss is NaN. Stopping training.")
+
+                    batch_val_losses.append(val_loss.cpu().detach().numpy())
+                    val_losses["epoch"] = np.append(val_losses["epoch"], epoch)
+                    val_losses["loss"] = np.append(
+                        val_losses["loss"], val_loss.cpu().detach().numpy()
+                    )
+                    val_losses["z2"] = np.append(
+                        val_losses["z2"], val_metrics["z2"].mean().cpu().detach().numpy()
+                    )
+                    val_losses["NLL"] = np.append(
+                        val_losses["NLL"], val_metrics["NLL"].cpu().detach().numpy()
+                    )
+                    val_losses["MTC"] = np.append(
+                        val_losses["MTC"], val_metrics["MTC"].cpu().detach().numpy()
+                    )
+                    # H_i is a vector not scalar
+                    val_losses["H_i"] = np.append(
+                        val_losses["H_i"], val_metrics["H_i"].cpu().detach().numpy()
+                    )
+                    val_losses["H_core"] = np.append(
+                        val_losses["H_core"], val_metrics["H_core"].cpu().detach().numpy()
+                    )
+                    val_losses["H_detail"] = np.append(
+                        val_losses["H_detail"], val_metrics["H_detail"].cpu().detach().numpy()
+                    )
+                    val_losses["MI_core_detail"] = np.append(
+                        val_losses["MI_core_detail"],
+                        val_metrics["MI_core_detail"].cpu().detach().numpy(),
+                    )
+                    val_losses["L2_rec"] = np.append(
+                        val_losses["L2_rec"], val_metrics["L2_rec"].cpu().detach().numpy()
+                    )
+                    if "sing_vals" in val_metrics:
+                        if "sing_vals" not in val_losses:
+                            val_losses["sing_vals"] = np.array([])
+                        val_losses["sing_vals"] = np.append(
+                            val_losses["sing_vals"], val_metrics["sing_vals"].cpu().detach().numpy()
+                        )
+                mean_val_loss = np.mean(batch_val_losses)
+                batch_val_losses = []
+
+        model.train()
+
+        if validation and epoch % 10 == 0:
+            if mean_val_loss < best_val_loss:
+                best_val_loss = mean_val_loss
+                checkpoint = {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "metrics_loss": losses,
+                    "val_metrics_loss": val_losses if validation else None,
+                    "log_path": log_path,
+                    "counts": use_counts,
+                    "conditions": conditions,
+                    "model_config": model_config,
+                }
+                torch.save(checkpoint, save_model_path)
+                logger.info("Saving checkpoint to " + save_model_path)
+        else:
+            if epoch % 50 == 0:
+                checkpoint = {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "metrics_loss": losses,
+                    "val_metrics_loss": val_losses if validation else None,
+                    "log_path": log_path,
+                    "counts": use_counts,
+                    "conditions": conditions,
+                    "model_config": model_config,
+                }
+
+    if not validation:
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "metrics_loss": losses,
+            "val_metrics_loss": val_losses if validation else None,
+            "log_path": log_path,
+            "counts": use_counts,
+            "conditions": conditions,
+            "model_config": model_config,
+        }
+        torch.save(checkpoint, save_model_path)
+        logger.info("Finished training. Saving model to " + save_model_path)
 
     print(f"Average time per update: {np.mean(times):.4f} seconds")
 
-    return model, optimizer, losses, log_path
+    return model, optimizer, losses, val_losses, log_path

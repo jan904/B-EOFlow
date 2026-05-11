@@ -5,8 +5,9 @@ import argparse
 
 from src.model.data_utils import (
     load_data,
-    prepare_data,
+    prepare_train_test_data,
     get_condition_shapes,
+    build_metacells,
 )
 from src.model.training_utils import train_INN
 from src.model.build_model import get_INN, ModelConfig
@@ -29,6 +30,8 @@ def parse_args():
     parser.add_argument("--model_prefix", type=str, default=None)
     parser.add_argument("--checkpoint", action="store_true")
     parser.add_argument("--use_counts", action="store_true")
+    parser.add_argument("--use_metacells", action="store_true")
+    parser.add_argument("--test_size", type=float, default=0.1)
 
     return parser.parse_args()
 
@@ -41,11 +44,21 @@ def main():
     dtype = torch.float32
 
     # Data loading and preprocessing
-    adata, _, _ = load_data(
-        args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
-    )
-    dataset, dataloader = prepare_data(
-        adata, args.batch_size, device, dtype, counts=args.use_counts, label_key=args.conditions
+    if args.use_metacells:
+        adata, _, _ = load_data(args.dataset, args.top_genes, log_transform=True, cell_types=None)
+        adata = build_metacells(adata)
+    else:
+        adata, _, _ = load_data(
+            args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
+        )
+    dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
+        adata,
+        args.batch_size,
+        device,
+        dtype,
+        counts=args.use_counts,
+        label_key=args.conditions,
+        test_size=args.test_size,
     )
 
     D_dim = dataset.X.shape[1]
@@ -89,8 +102,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_rotate_random_ablation"
-    output_dir_path += "_rotate_random_ablation"
+    model_path += "_size"
+    output_dir_path += "_size"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -103,7 +116,8 @@ def main():
         "dtype": dtype,
         "N_dim": N_dim,
         "D_dim": D_dim,
-        "dataloader": dataloader,
+        "train_dataloader": dataloader,
+        "test_dataloader": test_dataloader,
         "data_mean": dataset.X.mean(dim=0),
         "data_std": torch.ones(D_dim),
         "sigma_noise": args.sigma_noise,
@@ -154,6 +168,9 @@ def main():
         optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
 
         metrics_loss = checkpoint["metrics_loss"]
+        val_metrics_loss = (
+            checkpoint["val_metrics_loss"] if checkpoint["val_metrics_loss"] is not None else None
+        )
         log_path = checkpoint["log_path"]
         start_epoch = checkpoint["epoch"] + 1
 
@@ -162,7 +179,7 @@ def main():
             N_dim=N_dim,
             condition_shapes=condition_shapes,
             ch_hidden=args.width,
-            N_blocks=12,
+            N_blocks=4,
             lr=args.lr,
             warmup_steps=2 * len(dataloader),
             pre_normalize=True,
@@ -183,6 +200,7 @@ def main():
         kwargs_data,
         kwargs_loss,
         model_config=model_config,
+        val_metrics_loss=val_metrics_loss,
         num_epochs=NUM_EPOCHS,
         start_epoch=start_epoch,
         print_info=True,

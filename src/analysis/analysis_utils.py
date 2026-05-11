@@ -9,7 +9,12 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 from src.analysis.me_metrics import get_jacobian, get_MPMI, get_manifold_entropy
-from src.model.data_utils import prepare_data, get_condition_shapes, AdataDataset
+from src.model.data_utils import (
+    prepare_data,
+    get_condition_shapes,
+    AdataDataset,
+    prepare_train_test_data,
+)
 from src.analysis.plotting import (
     compare_spectra,
     compare_latent_effects,
@@ -45,7 +50,9 @@ class FlowAnalyser:
         csv_dir,
         checkpoint_path,
         metrics_loss=None,
+        val_metrics_loss=None,
         conditions=None,
+        test_size=0.1,
     ):
         self.adata = adata
         self.flow = flow
@@ -58,7 +65,9 @@ class FlowAnalyser:
         self.plot_dir = plot_dir
         self.csv_dir = csv_dir
         self.checkpoint_path = checkpoint_path
+
         self.metrics_loss = metrics_loss
+        self.val_metrics_loss = val_metrics_loss
 
         condition_shapes = None
         if conditions is not None:
@@ -73,6 +82,8 @@ class FlowAnalyser:
 
         self.pca = None
         self.x_pca = None
+
+        self.test_size = test_size
 
     @classmethod
     def from_checkpoint(
@@ -89,16 +100,18 @@ class FlowAnalyser:
         device=None,
         dtype=torch.float32,
         batch_size=1024,
+        test_size=0.1,
     ):
         if device == None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        dataset, dataloader = prepare_data(
+        dataset, train_dataloader, test_dataset, test_dataloader = prepare_train_test_data(
             adata,
             batch_size,
             device,
             dtype,
             label_key=conditions,
+            test_size=test_size,
         )
         D_dim = dataset.X.shape[1]
         N_dim = D_dim
@@ -111,14 +124,17 @@ class FlowAnalyser:
             dtype,
             N_dim,
             D_dim,
-            dataloader,
+            train_dataloader,
+            test_dataloader,
             dataset,
             sigma_noise,
             lam_MTC,
         )
 
         if os.path.exists(model_path):
-            flow, _, metrics_loss = get_INN_from_checkpoint(model_path, device=device)
+            flow, _, metrics_loss, val_metrics_loss = get_INN_from_checkpoint(
+                model_path, device=device
+            )
         else:
             raise FileNotFoundError(f"Checkpoint not found at {model_path}")
 
@@ -134,6 +150,7 @@ class FlowAnalyser:
             plot_dir,
             csv_dir,
             metrics_loss=metrics_loss,
+            val_metrics_loss=val_metrics_loss,
             conditions=conditions,
             checkpoint_path=model_path,
         )
@@ -164,13 +181,24 @@ class FlowAnalyser:
         return os.path.join(base_model_path, model_name), plot_dir, log_dir, csv_dir
 
     @staticmethod
-    def _build_kwargs(device, dtype, N_dim, D_dim, dataloader, dataset, sigma_noise, lam_MTC):
+    def _build_kwargs(
+        device,
+        dtype,
+        N_dim,
+        D_dim,
+        train_dataloader,
+        test_dataloader,
+        dataset,
+        sigma_noise,
+        lam_MTC,
+    ):
         kwargs_data = {
             "device": device,
             "dtype": dtype,
             "N_dim": N_dim,
             "D_dim": D_dim,
-            "dataloader": dataloader,
+            "train_dataloader": train_dataloader,
+            "test_dataloader": test_dataloader,
             "data_mean": dataset.X.mean(dim=0),
             "data_std": torch.ones(D_dim),
             "sigma_noise": sigma_noise,
@@ -208,13 +236,14 @@ class FlowAnalyser:
 
         return kwargs_data, kwargs_loss, metrics_loss
 
-    def compute_jacobian(self, x_input=None, calculate_entropy=True, N_samples=256):
+    def compute_jacobian(self, x_input=None, calculate_entropy=True, N_samples=256, use_noise=True):
         if x_input is None:
             idx = torch.randperm(self.adata.X.shape[0])[:N_samples]
             x_input = torch.tensor(self.adata.X.toarray(), dtype=torch.float32, device=self.device)[
                 idx
             ]
-            x_input = x_input + torch.randn_like(x_input) * self.sigma_noise
+            if use_noise:
+                x_input = x_input + torch.randn_like(x_input) * self.sigma_noise
 
         jac_dec, ljd, z, x = get_jacobian(
             self.kwargs_data,
@@ -485,8 +514,11 @@ def get_INN_from_checkpoint(
 
     print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
     metrics_loss = checkpoint["metrics_loss"]
+    val_metrics_loss = (
+        checkpoint["val_metrics_loss"] if checkpoint["val_metrics_loss"] is not None else None
+    )
 
-    return flow, optimizer_flow, metrics_loss
+    return flow, optimizer_flow, metrics_loss, val_metrics_loss
 
 
 def return_bottleneck_representation(

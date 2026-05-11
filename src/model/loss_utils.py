@@ -295,10 +295,10 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
     t7 = time.time() - start
     full_time = time.time() - start_
 
-    print(f"Time for forward pass: {full_time:.4f} seconds")
-    print(
-        f"T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f}, T6: {t6/full_time:.2f}",
-        f"T7: {t7/full_time:.2f}",
-    )
+    # print(f"Time for forward pass: {full_time:.4f} seconds")
+    # print(
+    #     f"T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f}, T6: {t6/full_time:.2f}",
+    #     f"T7: {t7/full_time:.2f}",
+    # )
 
     return loss, metrics

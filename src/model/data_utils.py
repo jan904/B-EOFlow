@@ -234,6 +234,16 @@ def prepare_train_test_data(
     seed=0,
 ):
     if not 0 < test_size < 1:
+        if test_size == 0:
+            dataset, dataloader = prepare_data(
+                adata, batchsize, device, dtype, label_key=label_key, counts=counts
+            )
+            return (
+                dataset,
+                dataloader,
+                None,
+                None,
+            )
         raise ValueError("test_size must be between 0 and 1.")
 
     n_obs = adata.n_obs
