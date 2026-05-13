@@ -7,7 +7,13 @@ import sys
 import os
 import time
 
-from src.model.loss_utils import get_loss, round_loss, DimensionSampler
+from src.model.loss_utils import (
+    get_loss,
+    round_loss,
+    DimensionSampler,
+    append_losses,
+    build_regularization_loss_string,
+)
 from src.utils.logger import get_logger
 
 try:
@@ -32,6 +38,7 @@ def train_INN(
     continue_log_path=None,
     conditions=None,
     use_counts=False,
+    validation=False,
 ):
 
     os.makedirs(os.path.dirname(save_model_path), exist_ok=True)
@@ -49,6 +56,7 @@ def train_INN(
 
     train_dataloader = kwargs_data["train_dataloader"]
     N_batches = len(train_dataloader)
+
     data_mean = (
         kwargs_data.get("data_mean", torch.zeros(kwargs_data["N_dim"]))
         .to(device=device)
@@ -62,15 +70,18 @@ def train_INN(
         .unsqueeze(0)
     )
 
-    validation = False
-    if kwargs_data["test_dataloader"] is not None:
-        test_dataloader = kwargs_data["test_dataloader"]
-        validation = True
-        val_losses = losses.copy() if val_metrics_loss is None else val_metrics_loss
+    patience = 10
+    patience_counter = 0
 
-        best_val_loss = float("inf")
-        batch_val_losses = []
-        mean_val_loss = float("inf")
+    test_dataloader = (
+        kwargs_data["test_dataloader"] if kwargs_data.get("test_dataloader") is not None else None
+    )
+    N_batches_val = len(kwargs_data["test_dataloader"]) if test_dataloader is not None else 0
+    val_losses = losses.copy() if val_metrics_loss is None else val_metrics_loss
+
+    best_val_loss = float("inf")
+    batch_val_losses = []
+    mean_val_loss = float("inf")
 
     print(f"Sigma noise: {kwargs_loss['sigma_noise']}")
     sigma_noise = kwargs_loss["sigma_noise"]
@@ -193,75 +204,15 @@ def train_INN(
             start = time.time()
 
             # torch.nn.utils.clip_grad_norm_(f.parameters(), 10)
-            losses["epoch"] = np.append(losses["epoch"], epoch)
-            losses["loss"] = np.append(losses["loss"], loss.cpu().detach().numpy())
-            losses["z2"] = np.append(losses["z2"], metrics["z2"].mean().cpu().detach().numpy())
-            losses["NLL"] = np.append(losses["NLL"], metrics["NLL"].cpu().detach().numpy())
-            losses["MTC"] = np.append(losses["MTC"], metrics["MTC"].cpu().detach().numpy())
-            # H_i is a vector not scalar
-            losses["H_i"] = np.append(losses["H_i"], metrics["H_i"].cpu().detach().numpy())
-            losses["H_core"] = np.append(losses["H_core"], metrics["H_core"].cpu().detach().numpy())
-            losses["H_detail"] = np.append(
-                losses["H_detail"], metrics["H_detail"].cpu().detach().numpy()
-            )
-            losses["MI_core_detail"] = np.append(
-                losses["MI_core_detail"],
-                metrics["MI_core_detail"].cpu().detach().numpy(),
-            )
-            losses["L2_rec"] = np.append(losses["L2_rec"], metrics["L2_rec"].cpu().detach().numpy())
-            if "sing_vals" in metrics:
-                if "sing_vals" not in losses:
-                    losses["sing_vals"] = np.array([])
-                losses["sing_vals"] = np.append(
-                    losses["sing_vals"], metrics["sing_vals"].cpu().detach().numpy()
-                )
+            losses = append_losses(losses, epoch, metrics, loss)
 
             end = time.time()
             times.append(end - start_)
 
         if logging:
-
-            losses_regularization = ""
-            # 'MTC:', round_loss(losses['MTC'][-N_batches:].mean()),
-            #'L2_rec:', round_loss(losses['L2_rec'][-N_batches:].mean())
-            # add regularization losses if they are used
-            if kwargs_loss["use_MER"]:
-                if kwargs_loss.get("use_align", False):
-                    losses_regularization += (
-                        "MI_core_detail: "
-                        + str(round_loss(losses["MI_core_detail"][-N_batches:].mean()))
-                        + " "
-                    )
-                    losses_regularization += (
-                        "H_core: " + str(round_loss(losses["H_core"][-N_batches:].mean())) + " "
-                    )
-                    losses_regularization += (
-                        "H_detail: " + str(round_loss(losses["H_detail"][-N_batches:].mean())) + " "
-                    )
-                else:
-                    losses_regularization += (
-                        "MTC: " + str(round_loss(losses["MTC"][-N_batches:].mean())) + " "
-                    )
-                    if kwargs_data["N_dim"] <= 3:
-                        # plot H_i per dimension
-                        for dim in range(kwargs_data["N_dim"]):
-                            losses_regularization += (
-                                "H_"
-                                + str(dim)
-                                + ": "
-                                + str(
-                                    round_loss(
-                                        losses["H_i"]
-                                        .reshape(-1, kwargs_data["N_dim"])[-N_batches:, dim]
-                                        .mean()
-                                    )
-                                )
-                                + " "
-                            )
-            if kwargs_loss.get("use_rec", False):
-                losses_regularization += (
-                    "L2_rec: " + str(round_loss(losses["L2_rec"][-N_batches:].mean())) + " "
-                )
+            losses_regularization = build_regularization_loss_string(
+                losses, kwargs_loss, kwargs_data, N_batches
+            )
 
             logger.info(
                 "Epoch "
@@ -283,7 +234,7 @@ def train_INN(
             #     f"Time for epoch {epoch}: {full_time:.4f} seconds (T1: {t1/full_time:.2f}, T2: {t2/full_time:.2f}, T3: {t3/full_time:.2f}, T4: {t4/full_time:.2f}, T5: {t5/full_time:.2f})"
             # )
 
-        if validation:
+        if epoch % 10 == 0 and test_dataloader is not None:
             model.eval()
             with torch.no_grad():
                 for i_batch, (x_val, c_val) in enumerate(test_dataloader):
@@ -312,56 +263,41 @@ def train_INN(
                         raise ValueError("Validation Loss is NaN. Stopping training.")
 
                     batch_val_losses.append(val_loss.cpu().detach().numpy())
-                    val_losses["epoch"] = np.append(val_losses["epoch"], epoch)
-                    val_losses["loss"] = np.append(
-                        val_losses["loss"], val_loss.cpu().detach().numpy()
+                    val_losses = append_losses(val_losses, epoch, val_metrics, val_loss)
+
+                if logging:
+                    val_losses_regularization = build_regularization_loss_string(
+                        val_losses, kwargs_loss, kwargs_data, N_batches_val
                     )
-                    val_losses["z2"] = np.append(
-                        val_losses["z2"], val_metrics["z2"].mean().cpu().detach().numpy()
-                    )
-                    val_losses["NLL"] = np.append(
-                        val_losses["NLL"], val_metrics["NLL"].cpu().detach().numpy()
-                    )
-                    val_losses["MTC"] = np.append(
-                        val_losses["MTC"], val_metrics["MTC"].cpu().detach().numpy()
-                    )
-                    # H_i is a vector not scalar
-                    val_losses["H_i"] = np.append(
-                        val_losses["H_i"], val_metrics["H_i"].cpu().detach().numpy()
-                    )
-                    val_losses["H_core"] = np.append(
-                        val_losses["H_core"], val_metrics["H_core"].cpu().detach().numpy()
-                    )
-                    val_losses["H_detail"] = np.append(
-                        val_losses["H_detail"], val_metrics["H_detail"].cpu().detach().numpy()
-                    )
-                    val_losses["MI_core_detail"] = np.append(
-                        val_losses["MI_core_detail"],
-                        val_metrics["MI_core_detail"].cpu().detach().numpy(),
-                    )
-                    val_losses["L2_rec"] = np.append(
-                        val_losses["L2_rec"], val_metrics["L2_rec"].cpu().detach().numpy()
-                    )
-                    if "sing_vals" in val_metrics:
-                        if "sing_vals" not in val_losses:
-                            val_losses["sing_vals"] = np.array([])
-                        val_losses["sing_vals"] = np.append(
-                            val_losses["sing_vals"], val_metrics["sing_vals"].cpu().detach().numpy()
-                        )
+
                 mean_val_loss = np.mean(batch_val_losses)
                 batch_val_losses = []
 
-        model.train()
+                logger.info(
+                    "Validation: "
+                    + ": Loss: "
+                    + str(round_loss(val_losses["loss"][-N_batches_val:].mean()))
+                    + " (Best: "
+                    + str(np.round(best_val_loss, 4))
+                    + ")"
+                    + " | z2: "
+                    + str(round_loss(val_losses["z2"][-N_batches_val:].mean()))
+                    + " | NLL: "
+                    + str(round_loss(val_losses["NLL"][-N_batches_val:].mean()))
+                    + " | "
+                    + val_losses_regularization
+                )
 
-        if validation and epoch % 10 == 0:
+        if validation and test_dataloader is not None:
             if mean_val_loss < best_val_loss:
                 best_val_loss = mean_val_loss
+                patience_counter = 0
                 checkpoint = {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "metrics_loss": losses,
-                    "val_metrics_loss": val_losses if validation else None,
+                    "val_metrics_loss": val_losses,
                     "log_path": log_path,
                     "counts": use_counts,
                     "conditions": conditions,
@@ -369,19 +305,33 @@ def train_INN(
                 }
                 torch.save(checkpoint, save_model_path)
                 logger.info("Saving checkpoint to " + save_model_path)
+            else:
+                patience_counter += 1
+                logger.info(
+                    f"No improvement in validation loss. Patience counter: {patience_counter}/{patience}"
+                )
+                if patience_counter >= patience:
+                    logger.info("Early stopping due to no improvement in validation loss.")
+                    break
         else:
+            if mean_val_loss < best_val_loss:
+                best_val_loss = mean_val_loss
             if epoch % 50 == 0:
                 checkpoint = {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "metrics_loss": losses,
-                    "val_metrics_loss": val_losses if validation else None,
+                    "val_metrics_loss": val_losses,
                     "log_path": log_path,
                     "counts": use_counts,
                     "conditions": conditions,
                     "model_config": model_config,
                 }
+                torch.save(checkpoint, save_model_path)
+                logger.info("Saving checkpoint to " + save_model_path)
+
+        model.train()
 
     if not validation:
         checkpoint = {
@@ -389,7 +339,7 @@ def train_INN(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "metrics_loss": losses,
-            "val_metrics_loss": val_losses if validation else None,
+            "val_metrics_loss": val_losses,
             "log_path": log_path,
             "counts": use_counts,
             "conditions": conditions,

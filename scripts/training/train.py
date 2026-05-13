@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--sigma_noise", type=float, default=0.5)
     parser.add_argument("--lam_MTC", type=float, default=1.0)
     parser.add_argument("--width", type=int, default=2048)
+    parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--conditions", nargs="+", default=None)
     parser.add_argument("--model_path", type=str, default="/home/jhoefer/sandbox/models/EOFlow")
     parser.add_argument("--log_root", type=str, default="/home/jhoefer/sandbox/results/logs")
@@ -31,6 +32,7 @@ def parse_args():
     parser.add_argument("--checkpoint", action="store_true")
     parser.add_argument("--use_counts", action="store_true")
     parser.add_argument("--use_metacells", action="store_true")
+    parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.1)
 
     return parser.parse_args()
@@ -102,8 +104,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_size"
-    output_dir_path += "_size"
+    model_path += "_depth"
+    output_dir_path += "_depth"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -152,6 +154,7 @@ def main():
         "MI_core_detail": [],
         "L2_rec": [],
     }
+    val_metrics_loss = metrics_loss.copy()
 
     start_epoch = 0
     log_path = None
@@ -168,9 +171,7 @@ def main():
         optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
 
         metrics_loss = checkpoint["metrics_loss"]
-        val_metrics_loss = (
-            checkpoint["val_metrics_loss"] if checkpoint["val_metrics_loss"] is not None else None
-        )
+        val_metrics_loss = checkpoint["val_metrics_loss"]
         log_path = checkpoint["log_path"]
         start_epoch = checkpoint["epoch"] + 1
 
@@ -179,7 +180,7 @@ def main():
             N_dim=N_dim,
             condition_shapes=condition_shapes,
             ch_hidden=args.width,
-            N_blocks=4,
+            N_blocks=args.depth,
             lr=args.lr,
             warmup_steps=2 * len(dataloader),
             pre_normalize=True,
@@ -193,7 +194,7 @@ def main():
         print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
-    flow, optimizer_flow, metrics_loss, log_path = train_INN(
+    flow, optimizer_flow, metrics_loss, val_metrics_loss, log_path = train_INN(
         flow,
         optimizer_flow,
         metrics_loss,
@@ -209,6 +210,7 @@ def main():
         save_model_path=os.path.join(model_path, model_name),
         conditions=args.conditions,
         use_counts=args.use_counts,
+        validation=args.validation,
     )
 
 

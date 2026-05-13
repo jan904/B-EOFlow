@@ -302,3 +302,75 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
     # )
 
     return loss, metrics
+
+
+def append_losses(losses, epoch, metrics, loss):
+    # torch.nn.utils.clip_grad_norm_(f.parameters(), 10)
+    losses["epoch"] = np.append(losses["epoch"], epoch)
+    losses["loss"] = np.append(losses["loss"], loss.cpu().detach().numpy())
+    losses["z2"] = np.append(losses["z2"], metrics["z2"].mean().cpu().detach().numpy())
+    losses["NLL"] = np.append(losses["NLL"], metrics["NLL"].cpu().detach().numpy())
+    losses["MTC"] = np.append(losses["MTC"], metrics["MTC"].cpu().detach().numpy())
+    # H_i is a vector not scalar
+    losses["H_i"] = np.append(losses["H_i"], metrics["H_i"].cpu().detach().numpy())
+    losses["H_core"] = np.append(losses["H_core"], metrics["H_core"].cpu().detach().numpy())
+    losses["H_detail"] = np.append(losses["H_detail"], metrics["H_detail"].cpu().detach().numpy())
+    losses["MI_core_detail"] = np.append(
+        losses["MI_core_detail"],
+        metrics["MI_core_detail"].cpu().detach().numpy(),
+    )
+    losses["L2_rec"] = np.append(losses["L2_rec"], metrics["L2_rec"].cpu().detach().numpy())
+    if "sing_vals" in metrics:
+        if "sing_vals" not in losses:
+            losses["sing_vals"] = np.array([])
+        losses["sing_vals"] = np.append(
+            losses["sing_vals"], metrics["sing_vals"].cpu().detach().numpy()
+        )
+
+    return losses
+
+
+def build_regularization_loss_string(losses, kwargs_loss, kwargs_data, N_batches):
+    losses_regularization = ""
+    # 'MTC:', round_loss(losses['MTC'][-N_batches:].mean()),
+    #'L2_rec:', round_loss(losses['L2_rec'][-N_batches:].mean())
+    # add regularization losses if they are used
+    if kwargs_loss["use_MER"]:
+        if kwargs_loss.get("use_align", False):
+            losses_regularization += (
+                "MI_core_detail: "
+                + str(round_loss(losses["MI_core_detail"][-N_batches:].mean()))
+                + " "
+            )
+            losses_regularization += (
+                "H_core: " + str(round_loss(losses["H_core"][-N_batches:].mean())) + " "
+            )
+            losses_regularization += (
+                "H_detail: " + str(round_loss(losses["H_detail"][-N_batches:].mean())) + " "
+            )
+        else:
+            losses_regularization += (
+                "MTC: " + str(round_loss(losses["MTC"][-N_batches:].mean())) + " "
+            )
+            if kwargs_data["N_dim"] <= 3:
+                # plot H_i per dimension
+                for dim in range(kwargs_data["N_dim"]):
+                    losses_regularization += (
+                        "H_"
+                        + str(dim)
+                        + ": "
+                        + str(
+                            round_loss(
+                                losses["H_i"]
+                                .reshape(-1, kwargs_data["N_dim"])[-N_batches:, dim]
+                                .mean()
+                            )
+                        )
+                        + " "
+                    )
+    if kwargs_loss.get("use_rec", False):
+        losses_regularization += (
+            "L2_rec: " + str(round_loss(losses["L2_rec"][-N_batches:].mean())) + " "
+        )
+
+    return losses_regularization
