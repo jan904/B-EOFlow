@@ -98,11 +98,11 @@ def get_MPMI(
     print_info=False,
 ):
 
-    jac_dec_1 = analyzer1.jac_dec
+    jac_dec_1 = analyzer1.jac_dec[:, analyzer1.latent_sort]
     if analyzer2 is None:
         jac_dec_2 = jac_dec_1
     else:
-        jac_dec_2 = analyzer2.jac_dec
+        jac_dec_2 = analyzer2.jac_dec[:, analyzer2.latent_sort]
 
     kwargs_data = analyzer1.kwargs_data
 

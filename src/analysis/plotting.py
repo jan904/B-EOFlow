@@ -2,6 +2,8 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 import scanpy as sc
+import seaborn as sns
+import pandas as pd
 import torch
 import os
 
@@ -301,6 +303,7 @@ def plot_loss(
     plot_smooth=True,
     subsample=1,
     ax=None,
+    x_scale=None,
     plot_dir=None,
 ):
 
@@ -316,6 +319,8 @@ def plot_loss(
         return
     assert subsample * filter_N <= x.shape[0] // 2, "Decrease filter_N!"
     scale = np.arange(0, x.shape[0] / subsample, 1 / subsample)
+    if x_scale is not None:
+        scale = x_scale
     x_smooth = plot_gauss_filter(x, filter_lim, subsample * filter_N, extrapolate=extrapolate)
     if plot_smooth:
         ax.plot(

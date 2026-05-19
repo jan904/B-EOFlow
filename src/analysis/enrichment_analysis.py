@@ -159,6 +159,9 @@ def bulk_enrichment_analysis(
     analyzer,
     top_k=None,
     location=None,
+    use_noise=True,
+    reorder=True,
+    return_results=False,
 ):
 
     gc.collect()
@@ -170,16 +173,17 @@ def bulk_enrichment_analysis(
 
     N_dim = analyzer.adata.X.shape[1]
     if analyzer.jac_dec is None:
-        analyzer.compute_jacobian()
+        analyzer.compute_jacobian(use_noise=use_noise)
 
     if location is not None:
         gene_importances = analyzer.jac_dec[location]  # torch.mean(torch.abs(jac_dec), dim=0)
     else:
         gene_importances = torch.mean(analyzer.jac_dec, dim=0)
 
-    gene_importances = gene_importances[
-        :, analyzer.latent_sort
-    ]  # Reorder genes according to latent importance
+    if reorder:
+        gene_importances = gene_importances[
+            :, analyzer.latent_sort
+        ]  # Reorder genes according to latent importance
     gene_scores_df = pd.DataFrame(
         gene_importances.T.cpu().numpy(),  # Transponse so rows correspond to latent factors and columns to genes
         columns=analyzer.adata.var_names,
@@ -200,24 +204,31 @@ def bulk_enrichment_analysis(
     hm_names = hm_acts.T.index
     pw_names = pw_acts.T.index
 
-    fig, ax = plt.subplots(len(hm_names) // 6 + 1, 6, figsize=(20, (len(hm_names) // 6 + 1) * 5))
-    for i, name in enumerate(hm_names):
-        dc.pl.barplot(data=hm_acts.T, name=name, top=25, figsize=(3, 12), ax=ax[i // 6, i % 6])
-        ax[i // 6, i % 6].set_title(name)
-    plt.tight_layout()
-    plt.savefig(os.path.join(analyzer.plot_dir, "hallmark_pathway_activities.png"))
-    plt.show()
+    if return_results:
+        analyzer.set_enrichment_scores(hm_names, hm_acts)
+        return hm_names, hm_acts
 
-    # fig, ax = plt.subplots(
-    #     len(pw_names) // 6 + 1, 6, figsize=(20, (len(pw_names) // 6 + 1) * 5)
-    # )
-    # for i, name in enumerate(pw_names):
-    #     dc.pl.barplot(
-    #         data=pw_acts.T, name=name, top=25, figsize=(3, 12), ax=ax[i // 6, i % 6]
-    #     )
-    #     ax[i // 6, i % 6].set_title(name)
-    # plt.tight_layout()
-    # plt.savefig(os.path.join(analyzer.plot_dir, "progeny_pathway_activities.png"))
-    # plt.show()
+    else:
+        fig, ax = plt.subplots(
+            len(hm_names) // 6 + 1, 6, figsize=(20, (len(hm_names) // 6 + 1) * 5)
+        )
+        for i, name in enumerate(hm_names):
+            dc.pl.barplot(data=hm_acts.T, name=name, top=25, figsize=(3, 12), ax=ax[i // 6, i % 6])
+            ax[i // 6, i % 6].set_title(name)
+        plt.tight_layout()
+        plt.savefig(os.path.join(analyzer.plot_dir, "hallmark_pathway_activities.png"))
+        plt.show()
 
-    analyzer.set_enrichment_scores(hm_names, hm_acts)
+        # fig, ax = plt.subplots(
+        #     len(pw_names) // 6 + 1, 6, figsize=(20, (len(pw_names) // 6 + 1) * 5)
+        # )
+        # for i, name in enumerate(pw_names):
+        #     dc.pl.barplot(
+        #         data=pw_acts.T, name=name, top=25, figsize=(3, 12), ax=ax[i // 6, i % 6]
+        #     )
+        #     ax[i // 6, i % 6].set_title(name)
+        # plt.tight_layout()
+        # plt.savefig(os.path.join(analyzer.plot_dir, "progeny_pathway_activities.png"))
+        # plt.show()
+
+        analyzer.set_enrichment_scores(hm_names, hm_acts)

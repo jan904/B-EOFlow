@@ -52,6 +52,10 @@ class FlowAnalyser:
         metrics_loss=None,
         val_metrics_loss=None,
         conditions=None,
+        subset=False,
+        latent_sort=None,
+        H_i=None,
+        H=None,
         test_size=0.1,
     ):
         self.adata = adata
@@ -76,14 +80,16 @@ class FlowAnalyser:
         self.conditions = conditions
 
         self.jac_dec = None
-        self.latent_sort = None
-        self.H_i = None
-        self.H = None
+        self.latent_sort = latent_sort
+        self.H_i = H_i
+        self.H = H
 
         self.pca = None
         self.x_pca = None
 
         self.test_size = test_size
+
+        self.subset = subset
 
     @classmethod
     def from_checkpoint(
@@ -239,9 +245,8 @@ class FlowAnalyser:
     def compute_jacobian(self, x_input=None, calculate_entropy=True, N_samples=256, use_noise=True):
         if x_input is None:
             idx = torch.randperm(self.adata.X.shape[0])[:N_samples]
-            x_input = torch.tensor(self.adata.X.toarray(), dtype=torch.float32, device=self.device)[
-                idx
-            ]
+            x = self.adata.X.toarray() if hasattr(self.adata.X, "toarray") else self.adata.X
+            x_input = torch.tensor(x, dtype=torch.float32, device=self.device)[idx]
             if use_noise:
                 x_input = x_input + torch.randn_like(x_input) * self.sigma_noise
 
@@ -255,7 +260,7 @@ class FlowAnalyser:
             subtract_mean=False,
         )
 
-        if calculate_entropy:
+        if calculate_entropy and not self.subset:
             with torch.no_grad():
                 H_i, H, latent_sort = get_manifold_entropy(
                     self.kwargs_data,
@@ -272,6 +277,10 @@ class FlowAnalyser:
 
     def subset(self, covariates, keys):
         _, mask = filter_xdata(self.adata, covariates=covariates, keys=keys, device=self.device)
+
+        if self.latent_sort is None:
+            self.compute_jacobian()
+
         return FlowAnalyser(
             self.adata[mask],
             self.flow,
@@ -282,6 +291,10 @@ class FlowAnalyser:
             self.csv_dir,
             self.checkpoint_path,
             conditions=self.conditions,
+            subset=True,
+            latent_sort=self.latent_sort,
+            H_i=self.H_i,
+            H=self.H,
         )
 
     def set_enrichment_scores(self, hm_names, hm_acts):
@@ -386,13 +399,11 @@ def analyze_result(
     if analyzer.metrics_loss is None:
         losses = get_loss_from_checkpoint(analyzer.checkpoint_path, device=analyzer.device)
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    plot_loss(
-        analyzer.metrics_loss["loss"],
-        "loss",
+    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+
+    shared_kwargs = dict(
         filter_lim=3,
         filter_N=50,
-        color="tab:blue",
         alpha=0.4,
         width=2,
         extrapolate=False,
@@ -403,9 +414,28 @@ def analyze_result(
         alpha_smooth=1,
         linestyle="solid",
         plot_smooth=True,
-        ax=ax,
         plot_dir=analyzer.plot_dir,
     )
+
+    val_x = np.linspace(
+        0, len(analyzer.metrics_loss["loss"]), len(analyzer.val_metrics_loss["loss"])
+    )
+    if analyzer.val_metrics_loss is None:
+        plots = [
+            (analyzer.metrics_loss["loss"], "training loss", "tab:blue", ax[0], None),
+            (analyzer.metrics_loss["NLL"], "NLL loss", "tab:blue", ax[1], None),
+            (analyzer.metrics_loss["MTC"], "MTC loss", "tab:orange", ax[1], None),
+        ]
+    else:
+        plots = [
+            (analyzer.metrics_loss["loss"], "training loss", "tab:blue", ax[0], None),
+            (analyzer.val_metrics_loss["loss"], "validation loss", "tab:orange", ax[0], val_x),
+            (analyzer.metrics_loss["NLL"], "NLL loss", "tab:blue", ax[1], None),
+            (analyzer.metrics_loss["MTC"], "MTC loss", "tab:orange", ax[1], None),
+        ]
+
+    for data, label, color, axis, x_scale in plots:
+        plot_loss(data, label, color=color, ax=axis, x_scale=x_scale, **shared_kwargs)
 
 
 def analyze_model(
@@ -469,9 +499,7 @@ def analyze_model(
     if MPMI:
         max_dim = min(50, analyzer.kwargs_data["N_dim"])
         MPMI_flow = get_MPMI(
-            analyzer.kwargs_data,
-            analyzer.jac_dec[:, analyzer.latent_sort],
-            analyzer.jac_dec[:, analyzer.latent_sort],
+            analyzer,
             max_dim=max_dim,
             dtype=torch.float64,
             device="cpu",
@@ -514,9 +542,7 @@ def get_INN_from_checkpoint(
 
     print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
     metrics_loss = checkpoint["metrics_loss"]
-    val_metrics_loss = (
-        checkpoint["val_metrics_loss"] if checkpoint["val_metrics_loss"] is not None else None
-    )
+    val_metrics_loss = checkpoint["val_metrics_loss"] if "val_metrics_loss" in checkpoint else None
 
     return flow, optimizer_flow, metrics_loss, val_metrics_loss
 

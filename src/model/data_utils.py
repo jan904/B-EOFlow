@@ -197,14 +197,31 @@ def load_kang_data(top_genes, log_transform=True):
     return adata, labels_key, control_label
 
 
-def load_data(dataset_name, top_genes, log_transform=True, cell_types=None):
+def load_data(
+    dataset_name,
+    top_genes,
+    log_transform=True,
+    cell_types=None,
+    subset=[
+        "CD40L",
+        "FGF-beta",
+        "CT-1",
+        "IFN-epsilon",
+        "IL-32-beta",
+        "IL-1-beta",
+        "IL-4",
+        "CD27L",
+        "IL-2",
+        "IL-13",
+    ],
+):
     if dataset_name == "kang":
         adata, labels_key, control_label = load_kang_data(
             top_genes=top_genes, log_transform=log_transform
         )
     elif dataset_name == "parse":
         adata, labels_key, control_label = load_parse_data(
-            top_genes=top_genes, log_transform=log_transform, cell_types=cell_types
+            top_genes=top_genes, log_transform=log_transform, cell_types=cell_types, subset=subset
         )
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
@@ -213,6 +230,7 @@ def load_data(dataset_name, top_genes, log_transform=True, cell_types=None):
         "top_genes": top_genes,
         "log_transform": log_transform,
         "cell_types": cell_types,
+        "subset": subset,
     }
     return adata, labels_key, control_label
 
