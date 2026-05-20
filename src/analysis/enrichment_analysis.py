@@ -185,7 +185,7 @@ def bulk_enrichment_analysis(
             :, analyzer.latent_sort
         ]  # Reorder genes according to latent importance
     gene_scores_df = pd.DataFrame(
-        gene_importances.T.cpu().numpy(),  # Transponse so rows correspond to latent factors and columns to genes
+        gene_importances.cpu().numpy(),  # Transponse so rows correspond to latent factors and columns to genes
         columns=analyzer.adata.var_names,
         index=[f"dim_{i}" for i in range(N_dim)],
     )

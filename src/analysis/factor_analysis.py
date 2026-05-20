@@ -5,6 +5,7 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import scanpy as sc
 import os
+from types import SimpleNamespace
 
 from src.utils.utils import filter_xdata
 from src.analysis.me_metrics import get_jacobian
@@ -15,21 +16,21 @@ from src.analysis.analysis_utils import (
 
 def get_gene_importances(jac_dec, top_k=10, location=None):
     if location is None:
-        gene_importances = torch.mean(torch.abs(jac_dec), dim=0)
+        gene_importances = torch.mean(jac_dec, dim=0)
     else:
-        gene_importances = torch.abs(jac_dec)[location]
-    top_genes = torch.topk(gene_importances, k=top_k, dim=0)
+        gene_importances = jac_dec[location]
+    top_genes = torch.topk(gene_importances.abs(), k=top_k, dim=1)
     return top_genes
 
 
 def draw_single_factor_on_ax(ax, jac_dec, top_genes, factor_idx, gene_names, top_k=10):
     """Helper function to draw one lollipop plot on a provided axis."""
     # 1. Get indices and absolute values
-    indices = top_genes.indices[:, factor_idx].cpu().numpy()
-    abs_weights = top_genes.values[:, factor_idx].cpu().numpy()
+    indices = top_genes.indices[factor_idx, :].cpu().numpy()
+    abs_weights = top_genes.values[factor_idx, :].cpu().numpy()
 
     # 2. Get directionality (consensus sign across samples)
-    raw_mean = jac_dec[:, indices, factor_idx].mean(dim=0).cpu().numpy()
+    raw_mean = jac_dec[:, :, factor_idx][:, indices].mean(dim=0).cpu().numpy()
     signs = np.sign(raw_mean)
 
     # 3. Get gene names
@@ -198,6 +199,6 @@ def pca_get_gene_importances(analyzer, noise_level, top_k=10):
     pca_components_ = analyzer.pca.components_[latent_order][:10]
     pca_components_ = torch.tensor(pca_components_, dtype=torch.float32, device=analyzer.device)
 
-    top_genes = torch.topk(pca_components_, k=top_k, dim=1)
-
-    return top_genes
+    abs_top = torch.topk(pca_components_.abs(), k=top_k, dim=1)
+    signed_values = pca_components_.gather(1, abs_top.indices)  # original signs
+    return SimpleNamespace(values=signed_values, indices=abs_top.indices)

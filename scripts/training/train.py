@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--sigma_noise", type=float, default=0.5)
     parser.add_argument("--lam_MTC", type=float, default=1.0)
     parser.add_argument("--width", type=int, default=2048)
-    parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--depth", type=int, default=8)
     parser.add_argument("--conditions", nargs="+", default=None)
     parser.add_argument("--model_path", type=str, default="/home/jhoefer/sandbox/models/EOFlow")
     parser.add_argument("--log_root", type=str, default="/home/jhoefer/sandbox/results/logs")
@@ -51,7 +51,7 @@ def main():
         adata = build_metacells(adata)
     else:
         adata, _, _ = load_data(
-            args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
+            args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"], subset=[""]
         )
     dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
         adata,
@@ -104,8 +104,8 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_depth"
-    output_dir_path += "_depth"
+    model_path += "_unimodal"
+    output_dir_path += "_unimodal"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 

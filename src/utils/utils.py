@@ -241,6 +241,8 @@ def filter_xdata(adata, covariates, keys, device):
     mask = np.ones(adata.shape[0], dtype=np.bool)
     if covariates is not None and keys is not None:
         for covariate, key in zip(covariates, keys):
+            if key not in adata.obs[covariate].unique():
+                raise ValueError(f"Key {key} not found in covariate {covariate}")
             mask &= adata.obs[covariate] == key
 
     x_data = adata[mask, :].X
