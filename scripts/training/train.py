@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--use_metacells", action="store_true")
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.1)
+    parser.add_argument("--condition_type", type=str, default=None)
 
     return parser.parse_args()
 
@@ -51,7 +52,7 @@ def main():
         adata = build_metacells(adata)
     else:
         adata, _, _ = load_data(
-            args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"], subset=[""]
+            args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
         )
     dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
         adata,
@@ -104,8 +105,12 @@ def main():
         model_path += "_cond"
         output_dir_path += "_cond"
 
-    model_path += "_unimodal"
-    output_dir_path += "_unimodal"
+        if args.condition_type is not None:
+            model_path += f"_{args.condition_type}"
+            output_dir_path += f"_{args.condition_type}"
+
+    # model_path += "_unimodal"
+    # output_dir_path += "_unimodal"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -165,13 +170,30 @@ def main():
         )
 
         model_config = checkpoint["model_config"]
-        flow, optimizer_flow = get_INN(config=model_config)
-        flow = flow.to(device)
-        flow.load_state_dict(checkpoint["model_state_dict"])
-        optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
+        model, optimizer = get_INN(config=model_config)
+        model = model.to(device)
+
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        saved_state = checkpoint["model_state_dict"]
+
+        remapped_state = {}
+        for k, v in saved_state.items():
+            if not k.startswith("flow.") and not k.startswith("means"):
+                remapped_state[f"flow.{k}"] = v
+            else:
+                remapped_state[k] = v
+
+        missing, unexpected = model.load_state_dict(remapped_state, strict=False)
+
+        non_prior_missing = [k for k in missing if not k.startswith("means")]
+        if non_prior_missing:
+            print(f"WARNING: unexpected missing keys: {non_prior_missing}")
+        else:
+            print(f"Flow weights loaded. Prior initialised fresh ({len(missing)} new params).")
 
         metrics_loss = checkpoint["metrics_loss"]
-        val_metrics_loss = checkpoint["val_metrics_loss"]
+        if "val_metrics_loss" in checkpoint:
+            val_metrics_loss = checkpoint["val_metrics_loss"]
         log_path = checkpoint["log_path"]
         start_epoch = checkpoint["epoch"] + 1
 
@@ -185,18 +207,18 @@ def main():
             warmup_steps=2 * len(dataloader),
             pre_normalize=True,
             normalize=True,
-            rotate_random=False,
+            condition_type=args.condition_type,
         )
 
         # Model initialization
-        flow, optimizer_flow = get_INN(config=model_config)
-        flow = flow.to(device)
+        model, optimizer = get_INN(config=model_config)
+        model = model.to(device)
         print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
-    flow, optimizer_flow, metrics_loss, val_metrics_loss, log_path = train_INN(
-        flow,
-        optimizer_flow,
+    model, optimizer, metrics_loss, val_metrics_loss, log_path = train_INN(
+        model,
+        optimizer,
         metrics_loss,
         kwargs_data,
         kwargs_loss,
@@ -210,7 +232,7 @@ def main():
         save_model_path=os.path.join(model_path, model_name),
         conditions=args.conditions,
         use_counts=args.use_counts,
-        validation=args.validation,
+        save_on_validation=args.validation,
     )
 
 

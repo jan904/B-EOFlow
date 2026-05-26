@@ -1,3 +1,4 @@
+from dask import config
 import torch
 import torch.nn as nn
 
@@ -34,10 +35,41 @@ class ModelConfig:
     lr: float = 5e-4
     optimizer_type: str = "schedulefree"
     warmup_steps: int = 300
+    condition_type: str = None
+
+    def __post_init__(self):
+        if self.condition_shapes is not None and self.condition_type is None:
+            raise ValueError("condition_type must be set when condition_shapes is provided.")
+        if self.condition_type is not None and self.condition_shapes is None:
+            raise ValueError("condition_shapes must be set when condition_type is provided.")
+
+        valid_condition_types = {"mixture", "normal", None}  # add yours
+        if self.condition_type not in valid_condition_types:
+            raise ValueError(
+                f"condition_type must be one of {valid_condition_types}, got '{self.condition_type}'."
+            )
+
+
+class INNWithMixturePrior(nn.Module):
+    def __init__(self, flow, N_dim, n_components=None, condition_type=None, init_std=0.1):
+        super().__init__()
+        self.flow = flow
+        if condition_type == "mixture":
+            if n_components is None:
+                raise ValueError("n_components must be specified for mixture condition type.")
+            self.means = nn.Parameter(torch.randn(n_components, N_dim) * init_std)
+        else:
+            self.means = None
+
+    def forward(self, x, c=None, rev=False):
+        return self.flow(x, c=c, rev=rev)
 
 
 # def simple_INN_init(N_dim, N_blocks = 8, conditions = 0, N_conv_blocks=None, padding_size=1, symmetric_convolution=False, subnet_fc=None, act_func='relu', ch_hidden=None, n_hidden_layers=2, ch_hidden_conv=16, bins=10, coupling_block_type = 'GLOW', clamp=2.0, kwargs_rotations={}, permute_random=False, permute_random=True, permute_random_soft=False, householder_perms=2, use_actnorms=True, use_rotations=True, lr=1e-3, device=None):
 def get_INN(config):
+
+    if config.condition_shapes is None and config.condition_type is not None:
+        raise ValueError("If condition_type is specified, condition_shapes must be provided.")
 
     flow = Ff.SequenceINN(config.N_dim)
 
@@ -51,12 +83,17 @@ def get_INN(config):
             layers=config.n_hidden_layers,
         )
 
-    if config.condition_shapes is not None:
-        cond = 0
-        cond_shape = config.condition_shapes
-    else:
+    n_components = None
+    if config.condition_shapes is None:
         cond = None
         cond_shape = None
+    elif config.condition_type == "mixture":
+        cond = None
+        cond_shape = None
+        n_components = config.condition_shapes[0]
+    else:
+        cond = 0
+        cond_shape = config.condition_shapes
 
     if config.pre_normalize:
         flow.append(Fm.ActNorm)
@@ -102,16 +139,27 @@ def get_INN(config):
     if config.post_rotate:
         flow.append(Orthogonal)
 
-    if config.optimizer_type == "Adam":
-        optimizer_flow = torch.optim.Adam(flow.parameters(), lr=config.lr, weight_decay=1e-5)
-    elif config.optimizer_type == "AdamW":
-        optimizer_flow = torch.optim.AdamW(flow.parameters(), lr=config.lr, weight_decay=1e-5)
-    elif config.optimizer_type == "SGD":
-        optimizer_flow = torch.optim.SGD(flow.parameters(), lr=config.lr, weight_decay=1e-5)
-    elif config.optimizer_type == "schedulefree":
-        optimizer_flow = schedulefree.AdamWScheduleFree(
-            flow.parameters(), lr=config.lr, warmup_steps=config.warmup_steps
-        )
-        optimizer_flow.train()
+    model = INNWithMixturePrior(
+        flow, N_dim=config.N_dim, n_components=n_components, condition_type=config.condition_type
+    )
 
-    return flow, optimizer_flow  # , losses
+    if config.optimizer_type == "Adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=1e-5)
+    elif config.optimizer_type == "AdamW":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=1e-5)
+    elif config.optimizer_type == "SGD":
+        optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, weight_decay=1e-5)
+    elif config.optimizer_type == "schedulefree":
+        optimizer = schedulefree.AdamWScheduleFree(
+            model.parameters(), lr=config.lr, warmup_steps=config.warmup_steps
+        )
+        optimizer.train()
+
+    return model, optimizer  # , losses
+
+
+#     optimizer_type="schedulefree",
+#     warmup_steps=100,
+#     n_layers=1,
+# )
+# flow = flow.to(device=device)

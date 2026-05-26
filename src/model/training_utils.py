@@ -38,8 +38,10 @@ def train_INN(
     continue_log_path=None,
     conditions=None,
     use_counts=False,
-    validation=False,
+    save_on_validation=False,
 ):
+
+    condition_type = model_config.condition_type
 
     os.makedirs(os.path.dirname(save_model_path), exist_ok=True)
 
@@ -99,6 +101,7 @@ def train_INN(
             logger.info(f"Setup:")
             logger.info("---------------------------------------------------------")
             logger.info(f"Conditioning on: {conditions}")
+            logger.info(f"Condition type: {condition_type}")
             logger.info("---------------------------------------------------------")
             logger.info("")
             logger.info(f"Model Setup:")
@@ -188,7 +191,14 @@ def train_INN(
             start = time.time()
 
             loss, metrics = get_loss(
-                model, x, kwargs_data, kwargs_loss, sampler, c=c, metrics_last=metrics_last
+                model,
+                x,
+                kwargs_data,
+                kwargs_loss,
+                sampler,
+                c=c,
+                metrics_last=metrics_last,
+                condition_type=condition_type,
             )
             t3 = time.time() - start
             start = time.time()
@@ -288,7 +298,7 @@ def train_INN(
                     + val_losses_regularization
                 )
 
-        if validation and test_dataloader is not None:
+        if save_on_validation and test_dataloader is not None:
             if mean_val_loss < best_val_loss:
                 best_val_loss = mean_val_loss
                 patience_counter = 0
@@ -333,7 +343,7 @@ def train_INN(
 
         model.train()
 
-    if not validation:
+    if not save_on_validation:
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),

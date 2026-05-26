@@ -55,20 +55,42 @@ def round_loss(loss, round=4):
         return np.round(loss.item(), round)
 
 
-def get_NLL_z(kwargs_data, z=None):
+def get_NLL_z(kwargs_data, z=None, c=None, means=None):
     # Assume standard normal prior p(z)
     # Compute the negative log-likelihood (NLL) using samples z per dimension. Alternatively this is the entropy of p_i(z_i) if z is None
     N_dim = kwargs_data["N_dim"]
 
-    if z is None:
-        z = torch.ones(N_dim)
-    return 1 / 2 * (z**2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
+    if c is None:
+        if z is None:
+            z = torch.ones(N_dim)
+        return 1 / 2 * (z**2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
+    else:
+        if c.dim() == 1:
+            c = c.unsqueeze(0)
+        c = c.float()
+        mu = c @ means
+        if z is None:
+            z = torch.ones_like(mu)
+        return 1 / 2 * ((z - mu) ** 2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
 
 
 import time
 
 
-def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=None):
+def get_loss(
+    model, x, kwargs_data, kwargs_loss, sampler, c=None, condition_type="mixture", metrics_last=None
+):
+
+    # If condition_type is 'normal', c is directly used as condition for the flow
+    # If condition_type is 'mixture', only the loss depends on c but not the flow itself
+    if c != None:
+        if condition_type == "normal":
+            c_model = c
+            c_prior = None
+        elif condition_type == "mixture":
+            c_model = None
+            c_prior = c[0]
+
     start_ = time.time()
     use_NLL = (
         kwargs_loss.get("use_NLL", True) * 1
@@ -117,12 +139,12 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
     t1 = time.time() - start_
     start = time.time()
 
-    z, ljd_enc = model(x, c=c, rev=False)  # pass through encoder
+    z, ljd_enc = model(x, c=c_model, rev=False)  # pass through encoder
 
     t2 = time.time() - start
     start = time.time()
 
-    NLL_z_i = get_NLL_z(kwargs_data, z=z)  # NLL per dimension
+    NLL_z_i = get_NLL_z(kwargs_data, z=z, c=c_prior, means=model.means)  # NLL per dimension
     t3 = time.time() - start
     start = time.time()
 
@@ -130,7 +152,7 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
     if use_MER or eval_MEMetrics:
         if mode_MER == "full":
             jac_dec = []
-            x_rec, ljd_dec = model(z, c=c, rev=True)  # pass through decoder
+            x_rec, ljd_dec = model(z, c=c_model, rev=True)  # pass through decoder
             for j in range(N_dim):
                 jac_dec.append(grad(x_rec[:, j].sum(), z, create_graph=True)[0])
             jac_dec = torch.stack(jac_dec, axis=2)  # Jacobian of the decoder
@@ -195,7 +217,7 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
 
             with dual_level():  # compute jvp
                 dual_z = make_dual(z, e)
-                dual_x, _ = model(dual_z, c=c, rev=True)
+                dual_x, _ = model(dual_z, c=c_model, rev=True)
                 _, x_jvp = unpack_dual(dual_x)
 
             x_jvp = x_jvp.reshape(batchsize, -1)  # reshape jpv to [B x D]
@@ -261,7 +283,7 @@ def get_loss(model, x, kwargs_data, kwargs_loss, sampler, c=None, metrics_last=N
         assert dims_rec is not None, "dims_rec must be specified when use_rec is True!"
         z_rec = z.clone()
         z_rec[:, dims_rec:] = 0.0
-        x_rec, _ = model(z_rec, c=c, rev=True)
+        x_rec, _ = model(z_rec, c=c_model, rev=True)
         L2_rec = 1 / 2 * ((x_rec - x) ** 2).mean()
         loss = loss + lam_rec * L2_rec
     else:

@@ -52,7 +52,7 @@ class FlowAnalyser:
         metrics_loss=None,
         val_metrics_loss=None,
         conditions=None,
-        subset=False,
+        is_subset=False,
         latent_sort=None,
         H_i=None,
         H=None,
@@ -89,7 +89,7 @@ class FlowAnalyser:
 
         self.test_size = test_size
 
-        self.subset = subset
+        self.is_subset = is_subset
 
     @classmethod
     def from_checkpoint(
@@ -260,7 +260,7 @@ class FlowAnalyser:
             subtract_mean=False,
         )
 
-        if calculate_entropy and not self.subset:
+        if calculate_entropy and not self.is_subset:
             with torch.no_grad():
                 H_i, H, latent_sort = get_manifold_entropy(
                     self.kwargs_data,
@@ -291,7 +291,7 @@ class FlowAnalyser:
             self.csv_dir,
             self.checkpoint_path,
             conditions=self.conditions,
-            subset=True,
+            is_subset=True,
             latent_sort=self.latent_sort,
             H_i=self.H_i,
             H=self.H,
@@ -535,16 +535,35 @@ def get_INN_from_checkpoint(
     )
 
     model_config = checkpoint["model_config"]
-    flow, optimizer_flow = get_INN(model_config)
-    flow = flow.to(device)
-    flow.load_state_dict(checkpoint["model_state_dict"])
-    optimizer_flow.load_state_dict(checkpoint["optimizer_state_dict"])
+    model, optimizer = get_INN(model_config)
+    model = model.to(device)
+
+    saved_state = checkpoint["model_state_dict"]
+    # Remap old keys (no 'flow.' prefix) to new wrapped keys
+    # Keys already prefixed with 'flow.' or 'prior.' are left untouched (future checkpoints)
+    remapped_state = {}
+    for k, v in saved_state.items():
+        if not k.startswith("flow.") and not k.startswith("means"):
+            remapped_state[f"flow.{k}"] = v
+        else:
+            remapped_state[k] = v
+
+    missing, unexpected = model.load_state_dict(remapped_state, strict=False)
+
+    # Only the prior keys should be missing — anything else is a real problem
+    non_prior_missing = [k for k in missing if not k.startswith("means")]
+    if non_prior_missing:
+        print(f"WARNING: unexpected missing keys: {non_prior_missing}")
+    else:
+        print(f"Flow weights loaded. Prior initialised fresh ({len(missing)} new params).")
+
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
     metrics_loss = checkpoint["metrics_loss"]
     val_metrics_loss = checkpoint["val_metrics_loss"] if "val_metrics_loss" in checkpoint else None
 
-    return flow, optimizer_flow, metrics_loss, val_metrics_loss
+    return model, optimizer, metrics_loss, val_metrics_loss
 
 
 def return_bottleneck_representation(
