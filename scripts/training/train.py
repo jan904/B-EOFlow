@@ -109,8 +109,8 @@ def main():
             model_path += f"_{args.condition_type}"
             output_dir_path += f"_{args.condition_type}"
 
-    # model_path += "_unimodal"
-    # output_dir_path += "_unimodal"
+    model_path += "_kmeans"
+    output_dir_path += "_kmeans"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 

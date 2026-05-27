@@ -149,10 +149,15 @@ def compare_spectra(
     pca_data_entropy,
     flow_data_entropy,
     plot_name="spectra",
+    title="",
     log_scale=True,
+    ax=None,
 ):
 
-    fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+    saving = False
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+        saving = True
 
     plot_ME_spectrum(
         analyzer.H_i.detach().cpu(),
@@ -174,13 +179,14 @@ def compare_spectra(
         ax=ax,
     )
 
-    plt.title("Manifold Entropy Spectra of EOFlow and PCA")
-    plt.tight_layout()
-
-    if analyzer.plot_dir is not None:
-        plt.savefig(os.path.join(analyzer.plot_dir, plot_name))
-
-    plt.show()
+    if saving:
+        plt.title("Manifold Entropy Spectra of EOFlow and PCA")
+        plt.tight_layout()
+        if analyzer.plot_dir is not None:
+            plt.savefig(os.path.join(analyzer.plot_dir, plot_name))
+        plt.show()
+    else:
+        ax.set_title(f"{title}")
 
 
 def plot_umap(
@@ -211,7 +217,9 @@ def plot_umap(
     plt.show()
 
 
-def compare_latent_effects(adata, latent_sort, plot_dir=None, n_latent_factors=1, vmax=None):
+def compare_latent_effects(
+    adata, latent_sort, plot_dir=None, n_latent_factors=1, vmax=None, plot_name_suffix=""
+):
 
     # Plot data colored by latent effect of PCA
     plot_umap(
@@ -222,7 +230,7 @@ def compare_latent_effects(adata, latent_sort, plot_dir=None, n_latent_factors=1
         vmax=vmax,
         suptitle="UMAP colored by latent effect of PCA",
         plot_dir=plot_dir,
-        plot_name="PCA",
+        plot_name=f"PCA{plot_name_suffix}",
     )
 
     # Plot data colored by latent effect of EOFlow
@@ -234,11 +242,11 @@ def compare_latent_effects(adata, latent_sort, plot_dir=None, n_latent_factors=1
         vmax=vmax,
         suptitle="UMAP colored by latent effect of EOFlow",
         plot_dir=plot_dir,
-        plot_name="EOFlow",
+        plot_name=f"EOFlow{plot_name_suffix}",
     )
 
 
-def plot_hist(latent_distribution, X_pca, plot_dir=None, plot_name="hist"):
+def plot_hist(latent_distribution, X_pca, plot_dir=None, plot_name="hist", plot_name_suffix=""):
     n_dims = len(latent_distribution)
     fig, axes = plt.subplots(2, n_dims, figsize=(5 * n_dims, 10))
 
@@ -256,7 +264,7 @@ def plot_hist(latent_distribution, X_pca, plot_dir=None, plot_name="hist"):
     plt.tight_layout()
 
     if plot_dir is not None:
-        plt.savefig(os.path.join(plot_dir, plot_name))
+        plt.savefig(os.path.join(plot_dir, plot_name + plot_name_suffix))
 
     plt.show()
 

@@ -7,6 +7,8 @@ import sys
 import os
 import time
 
+from sklearn.cluster import KMeans
+
 from src.model.loss_utils import (
     get_loss,
     round_loss,

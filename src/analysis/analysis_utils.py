@@ -52,6 +52,7 @@ class FlowAnalyser:
         metrics_loss=None,
         val_metrics_loss=None,
         conditions=None,
+        condition_type=None,
         is_subset=False,
         latent_sort=None,
         H_i=None,
@@ -78,6 +79,7 @@ class FlowAnalyser:
             condition_shapes = get_condition_shapes(adata, conditions)
         self.condition_shapes = condition_shapes
         self.conditions = conditions
+        self.condition_type = condition_type
 
         self.jac_dec = None
         self.latent_sort = latent_sort
@@ -138,7 +140,7 @@ class FlowAnalyser:
         )
 
         if os.path.exists(model_path):
-            flow, _, metrics_loss, val_metrics_loss = get_INN_from_checkpoint(
+            flow, _, metrics_loss, val_metrics_loss, model_config = get_INN_from_checkpoint(
                 model_path, device=device
             )
         else:
@@ -159,6 +161,7 @@ class FlowAnalyser:
             val_metrics_loss=val_metrics_loss,
             conditions=conditions,
             checkpoint_path=model_path,
+            condition_type=model_config.condition_type,
         )
 
     @staticmethod
@@ -278,7 +281,7 @@ class FlowAnalyser:
     def subset(self, covariates, keys):
         _, mask = filter_xdata(self.adata, covariates=covariates, keys=keys, device=self.device)
 
-        if self.latent_sort is None:
+        if self.latent_sort is None and self.conditions is not None:
             self.compute_jacobian()
 
         return FlowAnalyser(
@@ -348,32 +351,20 @@ def analyze_result(
     computation_batch_size=1024,
 ):
 
+    covariates = None
+    keys = [None]
+    if analyzer.conditions is not None:
+        covariates = analyzer.conditions
+        keys = analyzer.adata.obs[covariates[0]].unique().tolist()
+        with plt.ioff():
+            spectra_fig, spectra_ax = plt.subplots(
+                len(keys) // 2 + 1, 2, figsize=(12, 6 * (len(keys) // 2 + 1))
+            )
+    else:
+        spectra_fig, spectra_ax = None, None
+
     if analyzer.plot_dir is not None:
         os.makedirs(analyzer.plot_dir, exist_ok=True)
-
-    # Perform PCA
-    latent_sort_pca, adata, X_pca = compare_pca(
-        analyzer,
-        n_latent_factors=n_latent_factors,
-    )
-
-    # Compute latent effect and add to adata.obs
-    adata, latent_distributions = compute_latent_effect(
-        analyzer,
-        n_latent_factors=n_latent_factors,
-        batch_size=computation_batch_size,
-    )
-
-    pca_data_entropy, flow_data_entropy = compare_data_entropy(analyzer, latent_sort_pca)
-
-    # Compare ME spectrum to PCA spectrum
-    compare_spectra(
-        analyzer,
-        latent_sort_pca,
-        pca_data_entropy,
-        flow_data_entropy,
-        log_scale=log_scale,
-    )
 
     # Compute neighbor graph and UMAP using the specified representation (default: "X_scVI_un")
     adata = compute_neighbors(analyzer.adata, use_rep=use_rep)
@@ -381,20 +372,66 @@ def analyze_result(
 
     # Plot data colored by condition and cell type
     plot_umap(
-        analyzer.adata, color=[f"{analyzer.labels_key}", "cell_type"], plot_dir=analyzer.plot_dir
-    )
-
-    # Plot data colored by latent effect of EOFlow and PCA
-    compare_latent_effects(
         analyzer.adata,
-        analyzer.latent_sort,
+        color=[f"{analyzer.labels_key}", "cell_type"],
         plot_dir=analyzer.plot_dir,
-        n_latent_factors=n_latent_factors,
-        vmax=vmax,
     )
 
-    # Plot Histogram of latent distributions
-    plot_hist(latent_distributions, X_pca=X_pca, plot_dir=analyzer.plot_dir)
+    for i, key in enumerate(keys):
+        if key is not None:
+            subset_analyzer = analyzer.subset(covariates=covariates, keys=[key])
+        else:
+            subset_analyzer = analyzer
+
+        # Perform PCA
+        latent_sort_pca, adata, X_pca = compare_pca(
+            subset_analyzer,
+            n_latent_factors=n_latent_factors,
+        )
+
+        # Compute latent effect and add to adata.obs
+        adata, latent_distributions = compute_latent_effect(
+            subset_analyzer,
+            n_latent_factors=n_latent_factors,
+            batch_size=computation_batch_size,
+        )
+
+        pca_data_entropy, flow_data_entropy = compare_data_entropy(subset_analyzer, latent_sort_pca)
+
+        # Compare ME spectrum to PCA spectrum
+        compare_spectra(
+            subset_analyzer,
+            latent_sort_pca,
+            pca_data_entropy,
+            flow_data_entropy,
+            log_scale=log_scale,
+            ax=spectra_ax[i // 2, i % 2] if spectra_ax is not None else None,
+            title=f"{key}" if key is not None else "",
+        )
+
+        # Plot data colored by latent effect of EOFlow and PCA
+        compare_latent_effects(
+            subset_analyzer.adata,
+            subset_analyzer.latent_sort,
+            plot_dir=subset_analyzer.plot_dir,
+            n_latent_factors=n_latent_factors,
+            vmax=vmax,
+            plot_name_suffix=f"_{key}" if key is not None else "",
+        )
+
+        # Plot Histogram of latent distributions
+        plot_hist(
+            latent_distributions,
+            X_pca=X_pca,
+            plot_dir=subset_analyzer.plot_dir,
+            plot_name_suffix=f"_{key}" if key is not None else "",
+        )
+
+    if spectra_ax is not None:
+        spectra_fig.tight_layout()
+        if analyzer.plot_dir is not None:
+            spectra_fig.savefig(os.path.join(analyzer.plot_dir, "spectra.png"))
+        spectra_fig.show()
 
     if analyzer.metrics_loss is None:
         losses = get_loss_from_checkpoint(analyzer.checkpoint_path, device=analyzer.device)
@@ -563,7 +600,7 @@ def get_INN_from_checkpoint(
     metrics_loss = checkpoint["metrics_loss"]
     val_metrics_loss = checkpoint["val_metrics_loss"] if "val_metrics_loss" in checkpoint else None
 
-    return model, optimizer, metrics_loss, val_metrics_loss
+    return model, optimizer, metrics_loss, val_metrics_loss, model_config
 
 
 def return_bottleneck_representation(

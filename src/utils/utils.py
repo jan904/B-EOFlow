@@ -37,7 +37,7 @@ def augment_with_noise(X, noise_levels):
 
 def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1):
 
-    if analyzer.latent_sort is None:
+    if analyzer.latent_sort is None or analyzer.conditions is not None:
         analyzer.compute_jacobian()
 
     latent_distributions = []
@@ -48,7 +48,7 @@ def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1):
             if hasattr(X_batch, "toarray"):
                 X_batch = X_batch.toarray()
             X_batch = torch.tensor(X_batch, dtype=torch.float32).to(analyzer.device)
-            if analyzer.conditions is not None:
+            if analyzer.conditions is not None and analyzer.condition_type == "normal":
                 cat = pd.Categorical(analyzer.adata.obs[analyzer.conditions[0]][i : i + batch_size])
                 codes = torch.tensor(cat.codes, dtype=torch.long)
                 cond_batch = [F.one_hot(codes, num_classes=len(cat.categories)).to(analyzer.device)]

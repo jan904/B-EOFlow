@@ -57,7 +57,10 @@ class INNWithMixturePrior(nn.Module):
         if condition_type == "mixture":
             if n_components is None:
                 raise ValueError("n_components must be specified for mixture condition type.")
-            self.means = nn.Parameter(torch.randn(n_components, N_dim) * init_std)
+            means = torch.zeros(n_components, N_dim)
+            torch.nn.init.orthogonal_(means)
+            means = means * N_dim**0.5
+            self.means = torch.nn.Parameter(means)
         else:
             self.means = None
 
