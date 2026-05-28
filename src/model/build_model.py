@@ -60,7 +60,7 @@ class INNWithMixturePrior(nn.Module):
             means = torch.zeros(n_components, N_dim)
             torch.nn.init.orthogonal_(means)
             means = means * N_dim**0.5
-            self.means = torch.nn.Parameter(means)
+            self.means = torch.nn.Parameter(means, requires_grad=False)
         else:
             self.means = None
 

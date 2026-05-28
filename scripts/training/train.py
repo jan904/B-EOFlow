@@ -109,8 +109,8 @@ def main():
             model_path += f"_{args.condition_type}"
             output_dir_path += f"_{args.condition_type}"
 
-    model_path += "_kmeans"
-    output_dir_path += "_kmeans"
+    model_path += "_empirical"
+    output_dir_path += "_empirical"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -172,6 +172,8 @@ def main():
         model_config = checkpoint["model_config"]
         model, optimizer = get_INN(config=model_config)
         model = model.to(device)
+        if model.means is not None:
+            model.means = model.means.to(device)
 
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         saved_state = checkpoint["model_state_dict"]
@@ -213,6 +215,8 @@ def main():
         # Model initialization
         model, optimizer = get_INN(config=model_config)
         model = model.to(device)
+        if model.means is not None:
+            model.means = model.means.to(device)
         print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))

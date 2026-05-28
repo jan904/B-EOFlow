@@ -349,11 +349,12 @@ def analyze_result(
     n_latent_factors=4,
     use_rep="X_scVI_un",
     computation_batch_size=1024,
+    analyze_conditions=False,
 ):
 
     covariates = None
     keys = [None]
-    if analyzer.conditions is not None:
+    if analyzer.conditions is not None and analyze_conditions == True:
         covariates = analyzer.conditions
         keys = analyzer.adata.obs[covariates[0]].unique().tolist()
         with plt.ioff():
@@ -574,6 +575,8 @@ def get_INN_from_checkpoint(
     model_config = checkpoint["model_config"]
     model, optimizer = get_INN(model_config)
     model = model.to(device)
+    if model.means is not None:
+        model.means = model.means.to(device)
 
     saved_state = checkpoint["model_state_dict"]
     # Remap old keys (no 'flow.' prefix) to new wrapped keys

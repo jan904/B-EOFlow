@@ -141,6 +141,17 @@ def get_loss(
 
     z, ljd_enc = model(x, c=c_model, rev=False)  # pass through encoder
 
+    if c != None and condition_type == "mixture":
+        counts = c_prior.sum(dim=0, keepdim=True).T  # [N_cond x 1]
+        cluster_sums = c_prior.T @ z  # (K, D) sum of z per cluster
+        mask = counts.squeeze() > 0
+
+        with torch.no_grad():
+            new_means = cluster_sums[mask] / counts[mask]
+            print(new_means)
+            mask = mask.to(device=device)
+            model.means[mask] = new_means.to(device=device)
+
     t2 = time.time() - start
     start = time.time()
 
