@@ -206,6 +206,7 @@ class FlowAnalyser:
             "dtype": dtype,
             "N_dim": N_dim,
             "D_dim": D_dim,
+            "dataset": dataset,
             "train_dataloader": train_dataloader,
             "test_dataloader": test_dataloader,
             "data_mean": dataset.X.mean(dim=0),
@@ -676,25 +677,17 @@ def compare_data_entropy(analyzer, pca_variance):
 
 
 def test_latent_shape(
-    flow,
-    adata,
-    latent_sort,
-    device,
+    analyzer,
     n_latent_factors=10,
-    conditions=None,
     axes=None,
     plot_dir=None,
 ):
     if axes is None:
         fig, axes = plt.subplots(1, 2, figsize=(12, 6))
 
-    adata, latent_distributions = compute_latent_effect(
-        flow,
-        adata,
-        latent_sort,
-        conditions=conditions,
+    _, latent_distributions = compute_latent_effect(
+        analyzer,
         n_latent_factors=n_latent_factors,
-        device=device,
         batch_size=1024,
     )
 

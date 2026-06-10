@@ -35,7 +35,8 @@ def parse_args():
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.1)
     parser.add_argument("--condition_type", type=str, default=None)
-    parser.add_argument("--train_means", type=bool, default=False)
+    parser.add_argument("--train_means", action="store_true")
+    parser.add_argument("--lr_means", type=float, default=5e-4)
 
     return parser.parse_args()
 
@@ -217,6 +218,7 @@ def main():
             normalize=True,
             condition_type=args.condition_type,
             trainable_means=args.train_means,
+            lr_means=args.lr_means,
         )
 
         # Model initialization

@@ -71,7 +71,7 @@ class INNWithMixturePrior(nn.Module):
                 raise ValueError("n_components must be specified for mixture condition type.")
             means = torch.zeros(n_components, N_dim)
             torch.nn.init.orthogonal_(means)
-            means = means * N_dim**0.5
+            means = means * N_dim**0.5 * 2.0
             self.means = torch.nn.Parameter(means, requires_grad=trainable_means)
         else:
             self.means = None

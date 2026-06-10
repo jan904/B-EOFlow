@@ -106,6 +106,7 @@ def train_INN(
             logger.info(f"Conditioning on: {conditions}")
             logger.info(f"Condition type: {condition_type}")
             logger.info(f"Trainable means: {train_means}")
+            logger.info(f"Learning rate means: {model_config.lr_means}")
             logger.info("---------------------------------------------------------")
             logger.info("")
             logger.info(f"Model Setup:")
