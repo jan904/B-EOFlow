@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.1)
     parser.add_argument("--condition_type", type=str, default=None)
+    parser.add_argument("--train_means", type=bool, default=False)
 
     return parser.parse_args()
 
@@ -109,8 +110,13 @@ def main():
             model_path += f"_{args.condition_type}"
             output_dir_path += f"_{args.condition_type}"
 
-    model_path += "_empirical"
-    output_dir_path += "_empirical"
+            if args.condition_type == "mixture":
+                if args.train_means == True:
+                    model_path += f"_train_means"
+                    output_dir_path += f"_train_means"
+                else:
+                    model_path += "_empirical"
+                    output_dir_path += "_empirical"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -210,6 +216,7 @@ def main():
             pre_normalize=True,
             normalize=True,
             condition_type=args.condition_type,
+            trainable_means=args.train_means,
         )
 
         # Model initialization

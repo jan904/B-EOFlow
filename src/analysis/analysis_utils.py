@@ -263,7 +263,7 @@ class FlowAnalyser:
             subtract_mean=False,
         )
 
-        if calculate_entropy and not self.is_subset:
+        if calculate_entropy and (not self.is_subset or self.conditions is not None):
             with torch.no_grad():
                 H_i, H, latent_sort = get_manifold_entropy(
                     self.kwargs_data,

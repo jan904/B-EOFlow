@@ -33,9 +33,11 @@ class ModelConfig:
     normalize: bool = True
     post_rotate: bool = True
     lr: float = 5e-4
+    lr_means: float = 5e-4
     optimizer_type: str = "schedulefree"
     warmup_steps: int = 300
     condition_type: str = None
+    trainable_means: bool = False
 
     def __post_init__(self):
         if self.condition_shapes is not None and self.condition_type is None:
@@ -50,8 +52,18 @@ class ModelConfig:
             )
 
 
+def get_param_groups(model, config):
+    other_params = [p for name, p in model.named_parameters() if name != "means"]
+    param_groups = [{"params": other_params, "lr": config.lr}]
+
+    if model.means is not None and model.means.requires_grad:
+        param_groups.append({"params": [model.means], "lr": config.lr_means})
+
+    return param_groups
+
+
 class INNWithMixturePrior(nn.Module):
-    def __init__(self, flow, N_dim, n_components=None, condition_type=None, init_std=0.1):
+    def __init__(self, flow, N_dim, n_components=None, condition_type=None, trainable_means=False):
         super().__init__()
         self.flow = flow
         if condition_type == "mixture":
@@ -60,7 +72,7 @@ class INNWithMixturePrior(nn.Module):
             means = torch.zeros(n_components, N_dim)
             torch.nn.init.orthogonal_(means)
             means = means * N_dim**0.5
-            self.means = torch.nn.Parameter(means, requires_grad=False)
+            self.means = torch.nn.Parameter(means, requires_grad=trainable_means)
         else:
             self.means = None
 
@@ -143,18 +155,24 @@ def get_INN(config):
         flow.append(Orthogonal)
 
     model = INNWithMixturePrior(
-        flow, N_dim=config.N_dim, n_components=n_components, condition_type=config.condition_type
+        flow,
+        N_dim=config.N_dim,
+        n_components=n_components,
+        condition_type=config.condition_type,
+        trainable_means=config.trainable_means,
     )
 
+    param_groups = get_param_groups(model, config)
+
     if config.optimizer_type == "Adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=config.lr, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(param_groups, lr=config.lr, weight_decay=1e-5)
     elif config.optimizer_type == "AdamW":
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=1e-5)
+        optimizer = torch.optim.AdamW(param_groups, lr=config.lr, weight_decay=1e-5)
     elif config.optimizer_type == "SGD":
-        optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, weight_decay=1e-5)
+        optimizer = torch.optim.SGD(param_groups, lr=config.lr, weight_decay=1e-5)
     elif config.optimizer_type == "schedulefree":
         optimizer = schedulefree.AdamWScheduleFree(
-            model.parameters(), lr=config.lr, warmup_steps=config.warmup_steps
+            param_groups, lr=config.lr, warmup_steps=config.warmup_steps
         )
         optimizer.train()
 

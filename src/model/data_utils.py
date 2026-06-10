@@ -301,7 +301,9 @@ def get_condition_shapes(adata, conditions):
     return condition_shapes
 
 
-def create_latent_adata(adata, flow, device, dtype=torch.float32):
+def create_latent_adata(
+    adata, flow, device, conditions=None, condition_type=None, dtype=torch.float32
+):
     if hasattr(adata.X, "toarray"):
         X = adata.X.toarray()
     else:
@@ -312,10 +314,13 @@ def create_latent_adata(adata, flow, device, dtype=torch.float32):
     )
 
     z_latent = []
-    for X_batch, _ in dataloader:
+    for X_batch, y_batch in dataloader:
+        c = None
+        if conditions is not None and y_batch != -1 and condition_type == "normal":
+            c = [cond.to(device=device, dtype=dtype) for cond in y_batch]
         X_batch = X_batch.to(device)
         with torch.no_grad():
-            z_batch, _ = flow(X_batch, rev=False)
+            z_batch, _ = flow(X_batch, c=c, rev=False)
         z_latent.append(z_batch.cpu().numpy())
 
     z_latent = np.concatenate(z_latent, axis=0)

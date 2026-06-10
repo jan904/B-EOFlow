@@ -78,7 +78,15 @@ import time
 
 
 def get_loss(
-    model, x, kwargs_data, kwargs_loss, sampler, c=None, condition_type="mixture", metrics_last=None
+    model,
+    x,
+    kwargs_data,
+    kwargs_loss,
+    sampler,
+    c=None,
+    condition_type="mixture",
+    trainable_means=False,
+    metrics_last=None,
 ):
 
     # If condition_type is 'normal', c is directly used as condition for the flow
@@ -141,7 +149,7 @@ def get_loss(
 
     z, ljd_enc = model(x, c=c_model, rev=False)  # pass through encoder
 
-    if c != None and condition_type == "mixture":
+    if c != None and condition_type == "mixture" and trainable_means == False:
         counts = c_prior.sum(dim=0, keepdim=True).T  # [N_cond x 1]
         cluster_sums = c_prior.T @ z  # (K, D) sum of z per cluster
         mask = counts.squeeze() > 0

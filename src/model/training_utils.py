@@ -44,6 +44,7 @@ def train_INN(
 ):
 
     condition_type = model_config.condition_type
+    train_means = model_config.trainable_means
 
     os.makedirs(os.path.dirname(save_model_path), exist_ok=True)
 
@@ -104,6 +105,7 @@ def train_INN(
             logger.info("---------------------------------------------------------")
             logger.info(f"Conditioning on: {conditions}")
             logger.info(f"Condition type: {condition_type}")
+            logger.info(f"Trainable means: {train_means}")
             logger.info("---------------------------------------------------------")
             logger.info("")
             logger.info(f"Model Setup:")
@@ -201,6 +203,7 @@ def train_INN(
                 c=c,
                 metrics_last=metrics_last,
                 condition_type=condition_type,
+                trainable_means=train_means,
             )
             t3 = time.time() - start
             start = time.time()
@@ -268,6 +271,8 @@ def train_INN(
                         kwargs_loss,
                         sampler,
                         c=c_val,
+                        condition_type=condition_type,
+                        trainable_means=train_means,
                         metrics_last=metrics_last,
                     )
 

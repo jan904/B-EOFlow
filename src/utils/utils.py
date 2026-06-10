@@ -197,6 +197,9 @@ def compute_correlations(
     label_keys=["condition", "cell_type"],
 ):
 
+    if analyzer.latent_sort is None:
+        analyzer.compute_jacobian()
+
     if n_latents is None:
         n_latents = len(analyzer.latent_sort)
 
