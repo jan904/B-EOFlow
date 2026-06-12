@@ -22,16 +22,16 @@ def _get_logfold_changes(adata, labels_key, reference, sig_genes=None):
         data = data.toarray()
 
     ctrl_mask = adata.obs[labels_key] == reference
-    ctrl_mean = data[ctrl_mask].mean(axis=0).clip(min=1e-8)
+    ctrl_mean = data[ctrl_mask].mean(axis=0)
 
     lfc_results = {}
     for pert in perturbations:
         if pert == reference:
             continue
         pert_mask = adata.obs[labels_key] == pert
-        pert_mean = data[pert_mask].mean(axis=0).clip(min=1e-8)
+        pert_mean = data[pert_mask].mean(axis=0)
 
-        lfc = np.log2(pert_mean + 1e-8) - np.log2(ctrl_mean)
+        lfc = np.log2(pert_mean + 1e-8) - np.log2(ctrl_mean + 1e-8)
 
         df = pd.DataFrame(
             {
@@ -124,7 +124,7 @@ def evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs):
 # ── Reconstruction helpers ───────────────────────────────────────────────────
 
 
-def _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise, rotation_module=None):
+def _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise, perm_module=None):
     x_recon = []
     for x_batch, _ in dataloader:
         x_batch = x_batch.to(device=analyzer.device, dtype=analyzer.dtype)
@@ -132,8 +132,11 @@ def _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise, rotation_module
             x_batch = x_batch + torch.randn_like(x_batch) * analyzer.sigma_noise
         with torch.no_grad():
             z, _ = analyzer.flow(x_batch, rev=False)
-            if rotation_module is not None:
-                z = rotation_module(z)
+            if perm_module is not None:
+                P = perm_module.get_permutation_matrix()
+                hard = torch.zeros_like(P)
+                hard[torch.arange(len(P)), P.argmax(dim=1)] = 1.0
+                z = z @ hard
             z[:, analyzer.latent_sort[keep_dim:]] = 0
             x_rec, _ = analyzer.flow(z, rev=True)
         x_recon.append(x_rec)
@@ -228,10 +231,19 @@ def evaluate_de_effects(
     de_dfs, de_sig_dfs = {}, {}
 
     de_dfs, de_sig_dfs = evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs)
+    sig_genes = _get_gt_sig_genes(de_sig_dfs, perturbations)
+
+    if not FULL_DE:
+        de_dfs, de_sig_dfs = {}, {}
+        gt_adata = analyzer.adata.copy()
+        gt_adata.layers["counts"] = gt_adata.X.copy()
+        lfc_results = _get_logfold_changes(
+            gt_adata, analyzer.labels_key, analyzer.control_label, sig_genes=sig_genes
+        )
+        _collect_lfc_results(perturbations, f"original", lfc_results, de_dfs, de_sig_dfs)
+
     de_dfs_pca, de_sig_dfs_pca = de_dfs.copy(), de_sig_dfs.copy()
     de_dfs_vae, de_sig_dfs_vae = de_dfs.copy(), de_sig_dfs.copy()
-
-    sig_genes = _get_gt_sig_genes(de_sig_dfs, perturbations)
 
     dataset, dataloader = prepare_data(
         analyzer.adata,
@@ -306,11 +318,11 @@ def evaluate_de_effects(
     )
 
 
-def evaluate_rotated_results(
+def evaluate_permuted_results(
     analyzer,
     perturbations,
     keep_dims,
-    rotation_module,
+    perm_module,
     use_noise=False,
     batch_size=1024,
     FULL_DE=True,
@@ -323,9 +335,17 @@ def evaluate_rotated_results(
     de_dfs, de_sig_dfs = {}, {}
 
     de_dfs, de_sig_dfs = evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs)
-    de_dfs_rotated, de_sig_dfs_rotated = de_dfs.copy(), de_sig_dfs.copy()
-
     sig_genes = _get_gt_sig_genes(de_sig_dfs, perturbations)
+    if not FULL_DE:
+        de_dfs, de_sig_dfs = {}, {}
+        gt_adata = analyzer.adata.copy()
+        gt_adata.layers["counts"] = gt_adata.X.copy()
+        lfc_results = _get_logfold_changes(
+            gt_adata, analyzer.labels_key, analyzer.control_label, sig_genes=sig_genes
+        )
+        _collect_lfc_results(perturbations, f"original", lfc_results, de_dfs, de_sig_dfs)
+
+    de_dfs_permuted, de_sig_dfs_permuted = de_dfs.copy(), de_sig_dfs.copy()
 
     dataset, dataloader = prepare_data(
         analyzer.adata,
@@ -337,20 +357,20 @@ def evaluate_rotated_results(
     )
 
     metrics = {k: [] for k in ("rhos", "dir_agreements", "top_overlaps", "lfc_shifts")}
-    metrics_rotated = {k: [] for k in ("rhos", "dir_agreements", "top_overlaps", "lfc_shifts")}
+    metrics_permuted = {k: [] for k in ("rhos", "dir_agreements", "top_overlaps", "lfc_shifts")}
 
     for keep_dim in keep_dims:
         print(f"Evaluating DE effects for top {keep_dim} dimensions...")
         # Reconstruct
         x_flow = _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise)
-        x_flow_rotated = _reconstruct_flow(
-            analyzer, dataloader, keep_dim, use_noise, rotation_module=rotation_module
+        x_flow_permuted = _reconstruct_flow(
+            analyzer, dataloader, keep_dim, use_noise, perm_module=perm_module
         )
 
         # Run DE
         for x_recon, dfs, sig_dfs, tag in [
             (x_flow, de_dfs, de_sig_dfs, "flow"),
-            (x_flow_rotated, de_dfs_rotated, de_sig_dfs_rotated, "flow_rotated"),
+            (x_flow_permuted, de_dfs_permuted, de_sig_dfs_permuted, "flow_permuted"),
         ]:
             drop = _make_drop_adata(analyzer, x_recon)
             if FULL_DE:
@@ -368,9 +388,108 @@ def evaluate_rotated_results(
         ):
             m.append(val)
         for m, val in zip(
-            metrics_rotated.values(),
-            evaluate_de_results(de_sig_dfs_rotated, perturbations, keep_dim),
+            metrics_permuted.values(),
+            evaluate_de_results(de_sig_dfs_permuted, perturbations, keep_dim),
         ):
             m.append(val)
 
-    return tuple(np.array(v) for v in [*metrics.values(), *metrics_rotated.values()])
+    return tuple(np.array(v) for v in [*metrics.values(), *metrics_permuted.values()])
+
+
+def differentiable_lfc(x_recon_tensor, adata, labels_key, reference, perturbations, sig_genes=None):
+    results = {"var_names": list(adata.var_names)}  # shared gene index
+    ctrl_mask = torch.tensor((adata.obs[labels_key] == reference).values, dtype=torch.bool)
+    ctrl_mean = x_recon_tensor[ctrl_mask].mean(dim=0).clamp(min=1e-8)
+
+    for pert in perturbations:
+        pert_mask = torch.tensor((adata.obs[labels_key] == pert).values, dtype=torch.bool)
+        pert_mean = x_recon_tensor[pert_mask].mean(dim=0).clamp(min=1e-8)
+        lfc = torch.log2(pert_mean) - torch.log2(ctrl_mean)
+
+        if sig_genes is not None and pert in sig_genes:
+            idx = [i for i, g in enumerate(results["var_names"]) if g in sig_genes[pert]]
+            idx = torch.tensor(idx, device=x_recon_tensor.device)
+            lfc = lfc[idx]
+            results[f"var_names_{pert}"] = [results["var_names"][i] for i in idx.cpu().tolist()]
+
+        results[pert] = lfc
+
+    return results
+
+
+def differentiable_lfc_results(de_dfs, lfc_results, perturbations):
+    lfc_shifts = []
+    for pert in perturbations:
+        base_df = de_dfs[f"{pert}_original"]
+
+        lfc_pred = lfc_results[pert]
+
+        gene_order = base_df["names"].values
+        var_names = lfc_results.get(f"var_names_{pert}", lfc_results["var_names"])
+
+        valid_genes = [g for g in gene_order if g in var_names]
+        pred_idx = [var_names.index(g) for g in valid_genes]
+        base_idx = [i for i, g in enumerate(gene_order) if g in var_names]
+
+        lfc_pred = lfc_pred[pred_idx]
+        lfc_base = torch.tensor(base_df["logfoldchanges"].values[base_idx], dtype=torch.float32).to(
+            lfc_pred.device
+        )
+
+        valid = ~torch.isnan(lfc_base) & ~torch.isinf(lfc_base)
+
+        lfc_shifts.append((lfc_pred[valid] - lfc_base[valid]).abs().mean())
+
+    return lfc_shifts
+
+
+class LearnedOrthogonalRotation(torch.nn.Module):
+    def __init__(self, N_dim):
+        super().__init__()
+        self.N_dim = N_dim
+        self.B = torch.nn.Parameter(torch.zeros(N_dim, N_dim))
+
+    def get_rotation_matrix(self):
+        # Compute A = B - B^T to ensure skew-symmetry
+        A = self.B - self.B.T
+        # Compute the matrix exponential to get an orthogonal matrix
+        I = torch.eye(self.N_dim, device=self.B.device)
+        R = torch.linalg.solve(I - A, I + A)  # Cayley transform for orthogonal matrix
+        return R
+
+    def forward(self, z):
+        R = self.get_rotation_matrix()
+        return z @ R
+
+
+class LearnedSoftPermutation(torch.nn.Module):
+    def __init__(self, N_dim, temp=1.0, n_iters=20):
+        super().__init__()
+        self.N_dim = N_dim
+        self.temp = temp
+        self.n_iters = n_iters
+        self.S = torch.nn.Parameter(torch.zeros(N_dim, N_dim))
+
+    def get_permutation_matrix(self):
+        # Sinkhorn normalization → doubly stochastic matrix
+        P = self.S / self.temp
+        for _ in range(self.n_iters):
+            P = P - torch.logsumexp(P, dim=1, keepdim=True)  # row normalise
+            P = P - torch.logsumexp(P, dim=0, keepdim=True)  # col normalise
+        return torch.exp(P)
+
+    def forward(self, z):
+        P = self.get_permutation_matrix()
+        return z @ P
+
+
+def exponential_weight(x, N_dim, alpha):
+    return torch.exp(torch.tensor(-alpha * x / N_dim))
+
+
+def decay_loss(lfc_shifts, keep_dims, N_dim):
+    loss = 0
+    weight = exponential_weight(keep_dims, N_dim, alpha=5)
+    for shift in lfc_shifts:
+        loss += weight * shift
+    return loss
