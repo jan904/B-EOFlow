@@ -27,6 +27,7 @@ def get_jacobian(
     data_mean = kwargs_data.get("data_mean", torch.zeros(N_dim)).unsqueeze(0).to(device)
     data_std = kwargs_data.get("data_std", torch.ones(N_dim)).unsqueeze(0).to(device)
 
+    c_model = None
     if c is not None:
         if condition_type == "normal":
             c_model = c
@@ -194,6 +195,7 @@ def get_manifold_entropy(
     if z_dim is not None:
         N_dim = z_dim
 
+    c_prior = None
     if c is not None:
         if condition_type == "normal":
             c_prior = None

@@ -252,10 +252,14 @@ class FlowAnalyser:
             idx = torch.randperm(len(dataset))[:N_samples]
             x_input, cond = zip(*[dataset[i] for i in idx])
             x_input = torch.stack(x_input).to(self.device)
-            cond = [
-                torch.stack([c[k] for c in cond]).float().to(self.device)
-                for k in range(len(cond[0]))
-            ]  # list of (N, num_classes) tensors
+
+            if cond[0][0].all() == -1:
+                cond = None
+            else:
+                cond = [
+                    torch.stack([c[k] for c in cond]).float().to(self.device)
+                    for k in range(len(cond[0]))
+                ]  # list of (N, num_classes) tensors
 
             if use_noise:
                 x_input = x_input + torch.randn_like(x_input) * self.sigma_noise

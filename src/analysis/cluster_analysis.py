@@ -69,25 +69,28 @@ def plot_latent_means_umap(analyzer):
     plt.show()
 
 
-def plot_pairwise_distances(analyzer, metric="euclidean", log_scale=False):
+def plot_pairwise_distances(analyzer, metric="euclidean", log_scale=False, order=None):
     means = analyzer.flow.means.detach().cpu().numpy()  # (K, D)
     dataset = analyzer.kwargs_data["dataset"]
     labels = dataset.cats[0].categories.tolist()
 
-    order = [
-        "IL-4",
-        "IL-32-beta",
-        "IL-1-beta",
-        "IL-2",
-        "CD40L",
-        "CT-1",
-        "IFN-epsilon",
-        "IL-13",
-        "CD27L",
-        "FGF-beta",
-        "PBS",
-    ]
-    idx = [labels.index(l) for l in order]
+    if order is not None:
+        order = [
+            "IL-4",
+            "IL-32-beta",
+            "IL-1-beta",
+            "IL-2",
+            "CD40L",
+            "CT-1",
+            "IFN-epsilon",
+            "IL-13",
+            "CD27L",
+            "FGF-beta",
+            "PBS",
+        ]
+        idx = [labels.index(l) for l in order]
+    else:
+        idx = list(range(len(labels)))
 
     # Pairwise Euclidean distances
     dist_matrix = squareform(pdist(means, metric=metric))

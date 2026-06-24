@@ -121,11 +121,6 @@ def main():
 
     for epoch in tqdm(range(args.epochs)):
         for keep_dim in keep_dims:
-            ctrl_sum = None
-            pert_sums = {pert: None for pert in perturbations}
-
-            ctrl_count = 0
-            pert_counts = {pert: 0 for pert in perturbations}
 
             ctrl_mask_full = torch.tensor(
                 (analyzer.adata.obs[analyzer.labels_key].values == analyzer.control_label),
@@ -141,34 +136,38 @@ def main():
                 for pert in perturbations
             }
 
+            dim_optimizer.zero_grad()
+
+            ctrl_sum = None
+            pert_sums = {pert: None for pert in perturbations}
+            ctrl_count = 0
+            pert_counts = {pert: 0 for pert in perturbations}
             offset = 0
+            n_steps = 0
 
             for i_batch, (z_batch, _) in enumerate(dataloader):
                 z_batch = z_batch.to(device=analyzer.device, dtype=analyzer.dtype)
-                mask = torch.zeros_like(z_batch)
-                mask[:, analyzer.latent_sort[:keep_dim]] = 1
 
                 z_perm = dim_selector(z_batch, keep_dim)
-                # z_masked = z_perm * mask
-
                 x_recon, _ = checkpoint(flow_rev, z_perm, use_reentrant=False)
 
                 bsz = z_batch.shape[0]
                 ctrl_mask_batch = ctrl_mask_full[offset : offset + bsz]
                 if ctrl_mask_batch.any():
-                    sum = x_recon[ctrl_mask_batch].sum(dim=0)
-                    ctrl_sum = sum if ctrl_sum is None else ctrl_sum + sum
+                    s = x_recon[ctrl_mask_batch].sum(dim=0)
+                    ctrl_sum = s if ctrl_sum is None else ctrl_sum + s
                     ctrl_count += ctrl_mask_batch.sum().item()
 
                 for pert in perturbations:
                     pert_mask_batch = pert_masks_full[pert][offset : offset + bsz]
                     if pert_mask_batch.any():
-                        sum = x_recon[pert_mask_batch].sum(dim=0)
-                        pert_sums[pert] = sum if pert_sums[pert] is None else pert_sums[pert] + sum
+                        s = x_recon[pert_mask_batch].sum(dim=0)
+                        pert_sums[pert] = s if pert_sums[pert] is None else pert_sums[pert] + s
                         pert_counts[pert] += pert_mask_batch.sum().item()
 
                 offset += bsz
 
+                # compute and backprop loss every 20 batches, freeing the graph each time
                 if (i_batch % 20 == 0 or i_batch == len(dataloader) - 1) and i_batch > 0:
                     ctrl_mean = (ctrl_sum / ctrl_count).clamp(min=1e-8)
                     results = {"var_names": list(analyzer.adata.var_names)}
@@ -192,20 +191,24 @@ def main():
                         results[pert] = lfc
 
                     lfc_shift = differentiable_lfc_results(de_dfs, results, perturbations)
-                    loss = decay_loss(lfc_shift, keep_dim, N_dim)
-                    print(f"Keep dim {keep_dim} - Loss: {loss.item():.4f}")
-                    loss.backward()
-                    dim_optimizer.step()
-                    dim_optimizer.zero_grad()
+                    # normalize by number of accumulation steps so lr is stable
+                    loss = decay_loss(lfc_shift, keep_dim, N_dim) / len(dataloader) * 20
+                    loss.backward()  # accumulates gradients, frees graph
+                    n_steps += 1
 
+                    print(
+                        f"Epoch {epoch} | Keep dim {keep_dim} | Batch {i_batch} | Loss: {loss.item():.4f}"
+                    )
+
+                    # reset accumulators but keep gradients
                     ctrl_sum = None
                     pert_sums = {pert: None for pert in perturbations}
-
                     ctrl_count = 0
                     pert_counts = {pert: 0 for pert in perturbations}
 
-        temp_end = 1e-4
-        # perm_module.temp = temp_end + (1.0 - temp_end) * np.exp(-5 * epoch / args.epochs)
+            # single optimizer step per keep_dim after full pass
+            dim_optimizer.step()
+            dim_optimizer.zero_grad()
 
         torch.save(
             {

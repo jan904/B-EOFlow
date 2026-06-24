@@ -2,6 +2,8 @@ from dask import config
 import torch
 import torch.nn as nn
 
+import numpy as np
+
 import FrEIA.framework as Ff
 import FrEIA.modules as Fm
 import FrEIA.modules.splines as Fms
@@ -38,6 +40,7 @@ class ModelConfig:
     warmup_steps: int = 300
     condition_type: str = None
     trainable_means: bool = False
+    n_clusters: int = None
     means_seperation: float = 4.0
 
     def __post_init__(self):
@@ -114,7 +117,7 @@ def get_INN(config):
     elif config.condition_type == "mixture":
         cond = None
         cond_shape = None
-        n_components = config.condition_shapes[0]
+        n_components = config.n_clusters
     else:
         cond = 0
         cond_shape = config.condition_shapes

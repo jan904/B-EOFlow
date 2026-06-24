@@ -12,7 +12,14 @@ from sklearn.cluster import KMeans
 
 
 class AdataDataset(Dataset):
-    def __init__(self, adata, label_key=None, device=None, counts=False, dtype=torch.float32):
+    def __init__(
+        self,
+        adata,
+        label_key=None,
+        device=None,
+        counts=False,
+        dtype=torch.float32,
+    ):
         super().__init__()
 
         if counts:
@@ -28,6 +35,22 @@ class AdataDataset(Dataset):
         if label_key is not None:
             cats = []
             onehots = []
+
+            combined = adata.obs[label_key].astype(str).agg("__".join, axis=1)
+            cat = pd.Categorical(combined)
+            cats.append(cat)
+            codes = torch.tensor(cat.codes, dtype=torch.long)
+
+            # Handle possible -1 (NaN categories)
+            if (codes < 0).any():
+                raise ValueError(
+                    f"Found NaNs in combined {label_key}, cannot one-hot encode safely."
+                )
+            num_classes = len(cat.categories)
+
+            onehot = F.one_hot(codes, num_classes=num_classes)  # (N, num_classes)
+            onehots.append(onehot)
+
             for key in label_key:
                 cat = pd.Categorical(adata.obs[key])
                 cats.append(cat)
@@ -334,7 +357,7 @@ def build_metacells(
     adata,
     group_keys=["cell_type", "cytokine"],
     use_rep="X_pca",
-    metacells_per_group=200,
+    cells_per_metacell=20,
 ):
 
     sc.pp.pca(adata, n_comps=50)
@@ -345,10 +368,10 @@ def build_metacells(
         idx = group_adata.index
         sub = adata[idx]
 
-        if len(sub) < 10:
+        if len(sub) < cells_per_metacell:
             continue
 
-        num_metacells = min(metacells_per_group, len(sub) // 4)
+        num_metacells = len(sub) // cells_per_metacell
         X_rep = sub.obsm[use_rep]
         labels = KMeans(n_clusters=num_metacells, random_state=0).fit_predict(X_rep)
 

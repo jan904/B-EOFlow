@@ -130,6 +130,7 @@ def main():
         "dtype": dtype,
         "N_dim": N_dim,
         "D_dim": D_dim,
+        "dataset": dataset,
         "train_dataloader": dataloader,
         "test_dataloader": test_dataloader,
         "data_mean": dataset.X.mean(dim=0),
@@ -219,6 +220,8 @@ def main():
             condition_type=args.condition_type,
             trainable_means=args.train_means,
             lr_means=args.lr_means,
+            means_seperation=2.0,
+            n_clusters=len(dataset.cats[0].categories),
         )
 
         # Model initialization
