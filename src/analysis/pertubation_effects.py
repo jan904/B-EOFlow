@@ -124,7 +124,9 @@ def evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs):
 # ── Reconstruction helpers ───────────────────────────────────────────────────
 
 
-def _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise, perm_module=None):
+def _reconstruct_flow(
+    analyzer, dataloader, keep_dim, use_noise, perm_module=None, select_module=None
+):
     x_recon = []
     for x_batch, _ in dataloader:
         x_batch = x_batch.to(device=analyzer.device, dtype=analyzer.dtype)
@@ -137,7 +139,13 @@ def _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise, perm_module=Non
                 hard = torch.zeros_like(P)
                 hard[torch.arange(len(P)), P.argmax(dim=1)] = 1.0
                 z = z @ hard
-            z[:, analyzer.latent_sort[keep_dim:]] = 0
+                z[:, analyzer.latent_sort[keep_dim:]] = 0
+            if select_module is not None:
+                ranking = select_module.get_hard_ranking()
+                z[:, ranking[keep_dim:]] = 0
+            else:
+                z[:, analyzer.latent_sort[keep_dim:]] = 0
+
             x_rec, _ = analyzer.flow(z, rev=True)
         x_recon.append(x_rec)
     return torch.cat(x_recon, dim=0).cpu().numpy().clip(min=0)
@@ -322,11 +330,15 @@ def evaluate_permuted_results(
     analyzer,
     perturbations,
     keep_dims,
-    perm_module,
+    perm_module=None,
+    select_module=None,
     use_noise=False,
     batch_size=1024,
     FULL_DE=True,
 ):
+
+    if perm_module is None and select_module is None:
+        raise ValueError("At least one of perm_module or select_module must be provided.")
 
     if analyzer.pca is None:
         pca, x_pca = calculate_pca(analyzer.adata, analyzer.sigma_noise)
@@ -364,7 +376,12 @@ def evaluate_permuted_results(
         # Reconstruct
         x_flow = _reconstruct_flow(analyzer, dataloader, keep_dim, use_noise)
         x_flow_permuted = _reconstruct_flow(
-            analyzer, dataloader, keep_dim, use_noise, perm_module=perm_module
+            analyzer,
+            dataloader,
+            keep_dim,
+            use_noise,
+            perm_module=perm_module,
+            select_module=select_module,
         )
 
         # Run DE
@@ -481,6 +498,30 @@ class LearnedSoftPermutation(torch.nn.Module):
     def forward(self, z):
         P = self.get_permutation_matrix()
         return z @ P
+
+
+class LearnedDimSelector(torch.nn.Module):
+    def __init__(self, N_dim):
+        super().__init__()
+        # one score per dimension — higher = more important
+        self.scores = torch.nn.Parameter(torch.zeros(N_dim))
+        self.temp = 1.0
+
+    def get_mask(self, keep_dim):
+        # find the threshold: the keep_dim-th largest score
+        topk_vals, _ = torch.topk(self.scores, keep_dim)
+        threshold = topk_vals[-1]
+        # soft step function centered at threshold
+        soft_mask = torch.sigmoid((self.scores - threshold) / self.temp)
+        return soft_mask  # (N_dim,) values in (0, 1)
+
+    def forward(self, z, keep_dim):
+        mask = self.get_mask(keep_dim)
+        return z * mask  # (N, N_dim) — soft zeroing of unselected dims
+
+    def get_hard_ranking(self):
+        # at test time: just argsort scores descending
+        return self.scores.argsort(descending=True).cpu().numpy()
 
 
 def exponential_weight(x, N_dim, alpha):

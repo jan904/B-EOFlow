@@ -247,17 +247,26 @@ class FlowAnalyser:
         return kwargs_data, kwargs_loss, metrics_loss
 
     def compute_jacobian(self, x_input=None, calculate_entropy=True, N_samples=256, use_noise=True):
+        dataset = self.kwargs_data["dataset"]
         if x_input is None:
-            idx = torch.randperm(self.adata.X.shape[0])[:N_samples]
-            x = self.adata.X.toarray() if hasattr(self.adata.X, "toarray") else self.adata.X
-            x_input = torch.tensor(x, dtype=torch.float32, device=self.device)[idx]
+            idx = torch.randperm(len(dataset))[:N_samples]
+            x_input, cond = zip(*[dataset[i] for i in idx])
+            x_input = torch.stack(x_input).to(self.device)
+            cond = [
+                torch.stack([c[k] for c in cond]).float().to(self.device)
+                for k in range(len(cond[0]))
+            ]  # list of (N, num_classes) tensors
+
             if use_noise:
                 x_input = x_input + torch.randn_like(x_input) * self.sigma_noise
+        else:
+            cond = None
 
         jac_dec, ljd, z, x = get_jacobian(
             self.kwargs_data,
             self.flow,
-            condition_shapes=self.condition_shapes,
+            c=cond,
+            condition_type=self.condition_type,
             N_samples=N_samples,
             print_info=False,
             x_input=x_input,
@@ -271,6 +280,9 @@ class FlowAnalyser:
                     jac_dec.detach(),
                     ljd.detach(),
                     z=z.detach(),
+                    c=cond,
+                    condition_type=self.condition_type,
+                    means=self.flow.means.detach() if self.flow.means is not None else None,
                     print_info=True,
                 )
             self.latent_sort = latent_sort
@@ -279,11 +291,11 @@ class FlowAnalyser:
 
         self.jac_dec = jac_dec
 
-    def subset(self, covariates, keys):
+    def subset(self, covariates, keys, use_noise=False):
         _, mask = filter_xdata(self.adata, covariates=covariates, keys=keys, device=self.device)
 
         if self.latent_sort is None and self.conditions is not None:
-            self.compute_jacobian()
+            self.compute_jacobian(use_noise=use_noise)
 
         return FlowAnalyser(
             self.adata[mask],
@@ -295,6 +307,7 @@ class FlowAnalyser:
             self.csv_dir,
             self.checkpoint_path,
             conditions=self.conditions,
+            condition_type=self.condition_type,
             is_subset=True,
             latent_sort=self.latent_sort,
             H_i=self.H_i,
@@ -351,6 +364,7 @@ def analyze_result(
     use_rep="X_scVI_un",
     computation_batch_size=1024,
     analyze_conditions=False,
+    use_noise=False,
 ):
 
     covariates = None
@@ -381,7 +395,9 @@ def analyze_result(
 
     for i, key in enumerate(keys):
         if key is not None:
-            subset_analyzer = analyzer.subset(covariates=covariates, keys=[key])
+            subset_analyzer = analyzer.subset(
+                covariates=covariates, keys=[key], use_noise=use_noise
+            )
         else:
             subset_analyzer = analyzer
 
@@ -396,6 +412,7 @@ def analyze_result(
             subset_analyzer,
             n_latent_factors=n_latent_factors,
             batch_size=computation_batch_size,
+            use_noise=use_noise,
         )
 
         pca_data_entropy, flow_data_entropy = compare_data_entropy(subset_analyzer, latent_sort_pca)
@@ -493,6 +510,8 @@ def analyze_model(
     umaps=True,
     MPMI=True,
     correlations=True,
+    analyze_conditions=False,
+    use_noise=False,
 ):
 
     analyzer = FlowAnalyser.from_checkpoint(
@@ -518,6 +537,8 @@ def analyze_model(
             vmax=2,
             n_latent_factors=8,
             computation_batch_size=1024,
+            analyze_conditions=analyze_conditions,
+            use_noise=use_noise,
         )
 
     if correlations:

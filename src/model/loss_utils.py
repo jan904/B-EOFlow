@@ -87,11 +87,12 @@ def get_loss(
     condition_type="mixture",
     trainable_means=False,
     metrics_last=None,
+    momentum=0.9,
 ):
 
     # If condition_type is 'normal', c is directly used as condition for the flow
     # If condition_type is 'mixture', only the loss depends on c but not the flow itself
-    if c != None:
+    if c is not None:
         if condition_type == "normal":
             c_model = c
             c_prior = None
@@ -149,16 +150,17 @@ def get_loss(
 
     z, ljd_enc = model(x, c=c_model, rev=False)  # pass through encoder
 
-    if c != None and condition_type == "mixture" and trainable_means == False:
-        counts = c_prior.sum(dim=0, keepdim=True).T  # [N_cond x 1]
-        cluster_sums = c_prior.T @ z  # (K, D) sum of z per cluster
-        mask = counts.squeeze() > 0
+    # if c is not None and condition_type == "mixture" and trainable_means == False:
+    #     counts = c_prior.sum(dim=0, keepdim=True).T  # [N_cond x 1]
+    #     cluster_sums = c_prior.T @ z  # (K, D) sum of z per cluster
+    #     mask = counts.squeeze() > 0
 
-        with torch.no_grad():
-            new_means = cluster_sums[mask] / counts[mask]
-            print(new_means)
-            mask = mask.to(device=device)
-            model.means[mask] = new_means.to(device=device)
+    #     with torch.no_grad():
+    #         batch_means = cluster_sums[mask] / counts[mask]
+    #         mask = mask.to(device=device)
+    #         model.means[mask] = (1 - momentum) * model.means[mask] + momentum * batch_means.to(
+    #             device=device
+    #         )
 
     t2 = time.time() - start
     start = time.time()

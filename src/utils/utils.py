@@ -35,10 +35,10 @@ def augment_with_noise(X, noise_levels):
     return np.concatenate(X_augmented, axis=0)
 
 
-def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1):
+def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1, use_noise=False):
 
     if analyzer.latent_sort is None or analyzer.conditions is not None:
-        analyzer.compute_jacobian()
+        analyzer.compute_jacobian(use_noise=use_noise)
 
     latent_distributions = []
     for k in tqdm.tqdm(range(n_latent_factors)):
@@ -48,6 +48,9 @@ def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1):
             if hasattr(X_batch, "toarray"):
                 X_batch = X_batch.toarray()
             X_batch = torch.tensor(X_batch, dtype=torch.float32).to(analyzer.device)
+            X_batch = (
+                X_batch + torch.randn_like(X_batch) * analyzer.sigma_noise if use_noise else X_batch
+            )
             if analyzer.conditions is not None and analyzer.condition_type == "normal":
                 cat = pd.Categorical(analyzer.adata.obs[analyzer.conditions[0]][i : i + batch_size])
                 codes = torch.tensor(cat.codes, dtype=torch.long)

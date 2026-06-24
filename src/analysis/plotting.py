@@ -248,7 +248,7 @@ def compare_latent_effects(
 
 def plot_hist(latent_distribution, X_pca, plot_dir=None, plot_name="hist", plot_name_suffix=""):
     n_dims = len(latent_distribution)
-    fig, axes = plt.subplots(2, n_dims, figsize=(5 * n_dims, 10))
+    fig, axes = plt.subplots(3, n_dims, figsize=(5 * n_dims, 15))
 
     for k in range(n_dims):
         axes[0][k].hist(latent_distribution[k].numpy(), bins=50, color="tab:blue", alpha=0.7)
@@ -256,11 +256,20 @@ def plot_hist(latent_distribution, X_pca, plot_dir=None, plot_name="hist", plot_
         axes[0][k].set_xlabel("Latent value")
         axes[0][k].set_ylabel("Frequency")
         axes[0][k].grid()
-        axes[1][k].hist(X_pca[:, k], bins=50, color="tab:orange", alpha=0.7)
-        axes[1][k].set_title(f"Histogram of PCA component {k}")
-        axes[1][k].set_xlabel("PCA value")
+
+        data = latent_distribution[k].numpy()
+        axes[1][k].hist(latent_distribution[k].numpy(), bins=50, color="tab:blue", alpha=0.7)
+        sns.kdeplot(data, ax=axes[1][k], color="tab:red", linewidth=2)
+        axes[1][k].set_title(f"Histogram of log latent dimension {k}")
+        axes[1][k].set_xlabel("Latent value")
         axes[1][k].set_ylabel("Frequency")
+        axes[1][k].set_yscale("log")
         axes[1][k].grid()
+        axes[2][k].hist(X_pca[:, k], bins=50, color="tab:orange", alpha=0.7)
+        axes[2][k].set_title(f"Histogram of PCA component {k}")
+        axes[2][k].set_xlabel("PCA value")
+        axes[2][k].set_ylabel("Frequency")
+        axes[2][k].grid()
     plt.tight_layout()
 
     if plot_dir is not None:

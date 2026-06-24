@@ -12,7 +12,8 @@ from src.model.loss_utils import get_NLL_z
 def get_jacobian(
     kwargs_data,
     model,
-    condition_shapes=None,
+    c=None,
+    condition_type=None,
     compute_inverse=False,
     N_samples=1000,
     print_info=True,
@@ -26,12 +27,11 @@ def get_jacobian(
     data_mean = kwargs_data.get("data_mean", torch.zeros(N_dim)).unsqueeze(0).to(device)
     data_std = kwargs_data.get("data_std", torch.ones(N_dim)).unsqueeze(0).to(device)
 
-    if condition_shapes is not None:
-        shape = condition_shapes[0]
-        cond = torch.randint(0, shape, (N_samples,)).to(device)
-        cond = [nn.functional.one_hot(cond.to(device=device, dtype=int), num_classes=shape)]
-    else:
-        cond = None
+    if c is not None:
+        if condition_type == "normal":
+            c_model = c
+        elif condition_type == "mixture":
+            c_model = None
 
     if z_input is not None:
         z = z_input
@@ -42,7 +42,7 @@ def get_jacobian(
         if subtract_mean:
             x = x - data_mean
         # x = x - data_mean / data_std
-        z, _ = model(x, c=cond, rev=False)
+        z, _ = model(x, c=c_model, rev=False)
         z = z.detach().requires_grad_(True)
     else:
         z = torch.randn(N_samples, N_dim).to(device)
@@ -60,13 +60,13 @@ def get_jacobian(
 
     if not compute_inverse:
         print_mem("before forward")
-        x, ljd_dec = model(z, c=cond, rev=True)
+        x, ljd_dec = model(z, c=c_model, rev=True)
         print_mem("after forward")
     else:
-        x, _ = model(z, c=cond, rev=True)
+        x, _ = model(z, c=c_model, rev=True)
         x = x.detach()
         x.requires_grad = True
-        z, ljd_enc = model(x, c=cond, rev=False)
+        z, ljd_enc = model(x, c=c_model, rev=False)
 
         x, z = z, x
 
@@ -177,7 +177,16 @@ def get_MPMI(
 
 
 def get_manifold_entropy(
-    kwargs_data, jac_dec, ljd_dec, z_dim=None, z=None, NLL_prior=None, print_info=True
+    kwargs_data,
+    jac_dec,
+    ljd_dec,
+    z_dim=None,
+    z=None,
+    c=None,
+    condition_type=None,
+    means=None,
+    NLL_prior=None,
+    print_info=True,
 ):
     N_dim = kwargs_data["N_dim"]
     device = kwargs_data["device"]
@@ -185,6 +194,15 @@ def get_manifold_entropy(
     if z_dim is not None:
         N_dim = z_dim
 
+    if c is not None:
+        if condition_type == "normal":
+            c_prior = None
+        elif condition_type == "mixture":
+            c_prior = c[0]
+
+    assert not (
+        condition_type == "mixture" and means is None
+    ), "For mixture condition type, means must be provided"
     assert not (z is None and NLL_prior is None), "Either z or NLL_prior must be provided"
     assert not (
         z is not None and NLL_prior is not None
@@ -196,7 +214,7 @@ def get_manifold_entropy(
     if data_std.shape[-1] == 1:
         data_std = data_std.repeat(1, N_dim)  # [1 x N_dim]
     if z is not None:
-        NLL_z = get_NLL_z(kwargs_data, z=z)
+        NLL_z = get_NLL_z(kwargs_data, z=z, c=c_prior, means=means)
     else:
         NLL_z = NLL_prior
 

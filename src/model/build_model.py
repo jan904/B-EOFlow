@@ -38,6 +38,7 @@ class ModelConfig:
     warmup_steps: int = 300
     condition_type: str = None
     trainable_means: bool = False
+    means_seperation: float = 4.0
 
     def __post_init__(self):
         if self.condition_shapes is not None and self.condition_type is None:
@@ -63,7 +64,15 @@ def get_param_groups(model, config):
 
 
 class INNWithMixturePrior(nn.Module):
-    def __init__(self, flow, N_dim, n_components=None, condition_type=None, trainable_means=False):
+    def __init__(
+        self,
+        flow,
+        N_dim,
+        n_components=None,
+        condition_type=None,
+        trainable_means=False,
+        means_seperation=2.0,
+    ):
         super().__init__()
         self.flow = flow
         if condition_type == "mixture":
@@ -71,7 +80,7 @@ class INNWithMixturePrior(nn.Module):
                 raise ValueError("n_components must be specified for mixture condition type.")
             means = torch.zeros(n_components, N_dim)
             torch.nn.init.orthogonal_(means)
-            means = means * N_dim**0.5 * 2.0
+            means = means * N_dim**0.5 * means_seperation
             self.means = torch.nn.Parameter(means, requires_grad=trainable_means)
         else:
             self.means = None
@@ -160,6 +169,7 @@ def get_INN(config):
         n_components=n_components,
         condition_type=config.condition_type,
         trainable_means=config.trainable_means,
+        means_seperation=config.means_seperation,
     )
 
     param_groups = get_param_groups(model, config)

@@ -6,6 +6,7 @@ import anndata as ad
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from scipy.spatial.distance import pdist, squareform
+from matplotlib.colors import LogNorm
 
 from src.model.data_utils import create_latent_adata
 
@@ -68,7 +69,7 @@ def plot_latent_means_umap(analyzer):
     plt.show()
 
 
-def plot_pairwise_distances(analyzer):
+def plot_pairwise_distances(analyzer, metric="euclidean", log_scale=False):
     means = analyzer.flow.means.detach().cpu().numpy()  # (K, D)
     dataset = analyzer.kwargs_data["dataset"]
     labels = dataset.cats[0].categories.tolist()
@@ -89,14 +90,25 @@ def plot_pairwise_distances(analyzer):
     idx = [labels.index(l) for l in order]
 
     # Pairwise Euclidean distances
-    dist_matrix = squareform(pdist(means, metric="cosine"))
+    dist_matrix = squareform(pdist(means, metric=metric))
     dist_matrix = dist_matrix[np.ix_(idx, idx)]
 
     labels = [labels[i] for i in idx]
 
     # Plot
     fig, ax = plt.subplots(figsize=(8, 7))
-    im = ax.imshow(dist_matrix, cmap="viridis")
+
+    if log_scale:
+        im = ax.imshow(
+            dist_matrix,
+            cmap="viridis",
+            norm=LogNorm(vmin=dist_matrix[dist_matrix > 0].min(), vmax=dist_matrix.max()),
+        )
+        log_mid = np.sqrt(dist_matrix[dist_matrix > 0].min() * dist_matrix.max())
+        max_val = log_mid
+    else:
+        im = ax.imshow(dist_matrix, cmap="viridis")
+        max_val = dist_matrix.max() * 0.5
 
     ax.set_xticks(range(len(labels)))
     ax.set_yticks(range(len(labels)))
@@ -106,17 +118,21 @@ def plot_pairwise_distances(analyzer):
     # Annotate cells
     for i in range(len(labels)):
         for j in range(len(labels)):
+            val = dist_matrix[i, j]
             ax.text(
                 j,
                 i,
-                f"{dist_matrix[i, j]:.2f}",
+                f"{val:.2f}",
                 ha="center",
                 va="center",
                 fontsize=7,
-                color="white" if dist_matrix[i, j] > dist_matrix.max() * 0.5 else "black",
+                color="white" if val > max_val else "black",
             )
 
-    plt.colorbar(im, ax=ax, label="Distance")
+    if log_scale:
+        plt.colorbar(im, ax=ax, label="Distance", format="%.1f")
+    else:
+        plt.colorbar(im, ax=ax, label="Distance")
     ax.set_title("Pairwise distances")
     plt.tight_layout()
     plt.savefig(

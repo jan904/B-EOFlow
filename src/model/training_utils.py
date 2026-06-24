@@ -306,6 +306,9 @@ def train_INN(
                     + val_losses_regularization
                 )
 
+        if condition_type == "mixture" and train_means == False:
+            update_means_epoch(model, train_dataloader, device, momentum=1.0)
+
         if save_on_validation and test_dataloader is not None:
             if mean_val_loss < best_val_loss:
                 best_val_loss = mean_val_loss
@@ -369,3 +372,24 @@ def train_INN(
     print(f"Average time per update: {np.mean(times):.4f} seconds")
 
     return model, optimizer, losses, val_losses, log_path
+
+
+def update_means_epoch(model, dataloader, device, momentum=0.9):
+    cluster_sums = torch.zeros_like(model.means)  # (K, D)
+    counts = torch.zeros(model.means.shape[0], 1, device=device)  # (K, 1)
+
+    model.eval()
+    with torch.no_grad():
+        for x, c in dataloader:
+            x = x.to(device)
+            c = [cond.to(device=device, dtype=torch.float32) for cond in c]
+
+            z, _ = model(x, c=None, rev=False)
+
+            counts += c[0].sum(dim=0, keepdim=True).T
+            cluster_sums += c[0].T @ z
+
+    mask = counts.squeeze() > 0
+    epoch_means = cluster_sums[mask] / counts[mask]
+    model.means[mask] = (1 - momentum) * model.means[mask] + momentum * epoch_means
+    model.train()

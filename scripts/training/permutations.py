@@ -1,5 +1,6 @@
 import torch
 import argparse
+import numpy as np
 from functools import partial
 from tqdm import tqdm
 from torch.utils.checkpoint import checkpoint
@@ -8,6 +9,7 @@ from src.analysis.pertubation_effects import (
     evaluate_de_effects_gt,
     _get_gt_sig_genes,
     LearnedSoftPermutation,
+    LearnedDimSelector,
     _get_logfold_changes,
     _collect_lfc_results,
     differentiable_lfc_results,
@@ -35,7 +37,7 @@ def parse_args():
     parser.add_argument("--perturbations", nargs="+", default=["IL-4"])
     parser.add_argument("--FULL_DE", action="store_true")
     parser.add_argument("--epochs", type=int, default=10)
-
+    parser.add_argument("--save_prefix", type=str, default="")
     return parser.parse_args()
 
 
@@ -81,8 +83,11 @@ def main():
     perturbations = args.perturbations
     keep_dims = [1000, 500, 250, 100, 50, 25, 10, 5, 3, 1]
 
-    perm_module = LearnedSoftPermutation(N_dim).to(device)
-    perm_optimizer = torch.optim.Adam(perm_module.parameters(), lr=5e-3)
+    # perm_module = LearnedSoftPermutation(N_dim).to(device)
+    # perm_optimizer = torch.optim.Adam(perm_module.parameters(), lr=5e-3)
+
+    dim_selector = LearnedDimSelector(N_dim).to(device)
+    dim_optimizer = torch.optim.Adam(dim_selector.parameters(), lr=5e-3)
 
     de_dfs, de_sig_dfs = {}, {}
     de_dfs_gt, de_sig_dfs_gt = evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs)
@@ -96,6 +101,12 @@ def main():
         )
         _collect_lfc_results(perturbations, f"original", lfc_results, de_dfs, de_sig_dfs)
 
+    mask = np.ones(adata.shape[0], dtype=bool)
+    if labels_key is not None and args.perturbations is not None:
+        mask &= adata.obs[labels_key].isin([analyzer.control_label] + args.perturbations)
+    adata = adata[mask].copy()
+
+    analyzer.adata = adata
     latent_adata = create_latent_adata(analyzer.adata, analyzer.flow, analyzer.device)
     dataset, dataloader = prepare_data(
         latent_adata,
@@ -137,10 +148,10 @@ def main():
                 mask = torch.zeros_like(z_batch)
                 mask[:, analyzer.latent_sort[:keep_dim]] = 1
 
-                z_perm = perm_module(z_batch)
-                z_masked = z_perm * mask
+                z_perm = dim_selector(z_batch, keep_dim)
+                # z_masked = z_perm * mask
 
-                x_recon, _ = checkpoint(flow_rev, z_masked, use_reentrant=False)
+                x_recon, _ = checkpoint(flow_rev, z_perm, use_reentrant=False)
 
                 bsz = z_batch.shape[0]
                 ctrl_mask_batch = ctrl_mask_full[offset : offset + bsz]
@@ -184,8 +195,8 @@ def main():
                     loss = decay_loss(lfc_shift, keep_dim, N_dim)
                     print(f"Keep dim {keep_dim} - Loss: {loss.item():.4f}")
                     loss.backward()
-                    perm_optimizer.step()
-                    perm_optimizer.zero_grad()
+                    dim_optimizer.step()
+                    dim_optimizer.zero_grad()
 
                     ctrl_sum = None
                     pert_sums = {pert: None for pert in perturbations}
@@ -193,15 +204,16 @@ def main():
                     ctrl_count = 0
                     pert_counts = {pert: 0 for pert in perturbations}
 
-        perm_module.temp = max(0.01, 1.0 * 0.95**epoch)
+        temp_end = 1e-4
+        # perm_module.temp = temp_end + (1.0 - temp_end) * np.exp(-5 * epoch / args.epochs)
 
         torch.save(
             {
-                "permutation_module": perm_module.state_dict(),
-                "optimizer": perm_optimizer.state_dict(),
+                "dim_selector": dim_selector.state_dict(),
+                "optimizer": dim_optimizer.state_dict(),
                 "epoch": epoch,
             },
-            "/home/jhoefer/sandbox/models/permutations/permutation_checkpoint.pt",
+            "/home/jhoefer/sandbox/models/permutations/dim_selector_checkpoint.pt",
         )
 
 
