@@ -237,6 +237,7 @@ def load_data(
         "IL-2",
         "IL-13",
     ],
+    donors=["Donor1"],
 ):
     if dataset_name == "kang":
         adata, labels_key, control_label = load_kang_data(
@@ -244,7 +245,11 @@ def load_data(
         )
     elif dataset_name == "parse":
         adata, labels_key, control_label = load_parse_data(
-            top_genes=top_genes, log_transform=log_transform, cell_types=cell_types, subset=subset
+            top_genes=top_genes,
+            log_transform=log_transform,
+            cell_types=cell_types,
+            subset=subset,
+            donors=donors,
         )
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")

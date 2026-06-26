@@ -95,9 +95,6 @@ class INNWithMixturePrior(nn.Module):
 # def simple_INN_init(N_dim, N_blocks = 8, conditions = 0, N_conv_blocks=None, padding_size=1, symmetric_convolution=False, subnet_fc=None, act_func='relu', ch_hidden=None, n_hidden_layers=2, ch_hidden_conv=16, bins=10, coupling_block_type = 'GLOW', clamp=2.0, kwargs_rotations={}, permute_random=False, permute_random=True, permute_random_soft=False, householder_perms=2, use_actnorms=True, use_rotations=True, lr=1e-3, device=None):
 def get_INN(config):
 
-    if config.condition_shapes is None and config.condition_type is not None:
-        raise ValueError("If condition_type is specified, condition_shapes must be provided.")
-
     flow = Ff.SequenceINN(config.N_dim)
 
     subnet_fc = config.subnet_fc
@@ -117,7 +114,10 @@ def get_INN(config):
     elif config.condition_type == "mixture":
         cond = None
         cond_shape = None
-        n_components = config.n_clusters
+        if config.n_clusters is None:
+            n_components = config.condition_shapes[0]
+        else:
+            n_components = config.n_clusters
     else:
         cond = 0
         cond_shape = config.condition_shapes

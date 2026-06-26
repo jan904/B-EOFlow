@@ -505,7 +505,7 @@ class LearnedDimSelector(torch.nn.Module):
         super().__init__()
         # one score per dimension — higher = more important
         self.scores = torch.nn.Parameter(torch.zeros(N_dim))
-        self.temp = 1.0
+        self.temp = 0.1
 
     def get_mask(self, keep_dim):
         # find the threshold: the keep_dim-th largest score
@@ -525,11 +525,12 @@ class LearnedDimSelector(torch.nn.Module):
 
 
 def exponential_weight(x, N_dim, alpha):
-    return torch.exp(torch.tensor(-alpha * x / N_dim))
+    x = torch.as_tensor(x, dtype=torch.float32)
+    return torch.exp(-alpha * x / N_dim)
 
 
 def decay_loss(lfc_shifts, keep_dims, N_dim):
-    loss = 0
+    loss = 0.0
     weight = exponential_weight(keep_dims, N_dim, alpha=5)
     for shift in lfc_shifts:
         loss += weight * shift

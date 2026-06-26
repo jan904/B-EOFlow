@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--use_counts", action="store_true")
     parser.add_argument("--use_metacells", action="store_true")
     parser.add_argument("--validation", action="store_true")
-    parser.add_argument("--test_size", type=float, default=0.1)
+    parser.add_argument("--test_size", type=float, default=0.0)
     parser.add_argument("--condition_type", type=str, default=None)
     parser.add_argument("--train_means", action="store_true")
     parser.add_argument("--lr_means", type=float, default=5e-4)
@@ -51,7 +51,7 @@ def main():
     # Data loading and preprocessing
     if args.use_metacells:
         adata, _, _ = load_data(args.dataset, args.top_genes, log_transform=True, cell_types=None)
-        adata = build_metacells(adata)
+        adata = build_metacells(adata, group_keys=args.conditions)
     else:
         adata, _, _ = load_data(
             args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]

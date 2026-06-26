@@ -87,7 +87,7 @@ def main():
     # perm_optimizer = torch.optim.Adam(perm_module.parameters(), lr=5e-3)
 
     dim_selector = LearnedDimSelector(N_dim).to(device)
-    dim_optimizer = torch.optim.Adam(dim_selector.parameters(), lr=5e-3)
+    dim_optimizer = torch.optim.Adam(dim_selector.parameters(), lr=5e-4)
 
     de_dfs, de_sig_dfs = {}, {}
     de_dfs_gt, de_sig_dfs_gt = evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs)
