@@ -41,7 +41,10 @@ class ModelConfig:
     condition_type: str = None
     trainable_means: bool = False
     n_clusters: int = None
-    means_seperation: float = 4.0
+    means_seperation: float = 2.0
+    supervise_latent_meaning: bool = False
+    ctrl_idx: int = None
+    lam_supervise: float = 0.01
 
     def __post_init__(self):
         if self.condition_shapes is not None and self.condition_type is None:

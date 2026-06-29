@@ -344,7 +344,7 @@ def create_latent_adata(
     z_latent = []
     for X_batch, y_batch in dataloader:
         c = None
-        if conditions is not None and y_batch != -1 and condition_type == "normal":
+        if conditions is not None and condition_type == "normal":
             c = [cond.to(device=device, dtype=dtype) for cond in y_batch]
         X_batch = X_batch.to(device)
         with torch.no_grad():

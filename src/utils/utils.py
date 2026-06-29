@@ -198,13 +198,18 @@ def compute_correlations(
     analyzer,
     n_latents=None,
     label_keys=["condition", "cell_type"],
+    dims=None,
 ):
 
-    if analyzer.latent_sort is None:
-        analyzer.compute_jacobian()
-
-    if n_latents is None:
-        n_latents = len(analyzer.latent_sort)
+    if dims is not None:
+        dims_to_analyze = dims
+        n_latents = len(dims)
+    else:
+        if analyzer.latent_sort is None:
+            analyzer.compute_jacobian()
+        if n_latents is None:
+            n_latents = len(analyzer.latent_sort)
+        dims_to_analyze = analyzer.latent_sort[:n_latents]
 
     dataset = AdataDataset(analyzer.adata, label_key=analyzer.conditions, device=analyzer.device)
     dataloader = DataLoader(dataset, batch_size=analyzer.adata.X.shape[0], shuffle=False)
@@ -219,11 +224,11 @@ def compute_correlations(
             z, _ = analyzer.flow(x, c=c, rev=False)
             correlations = {}
             for k in range(n_latents):
-                z_dim = z[:, analyzer.latent_sort[k]]
-                correlations[f"latent_{analyzer.latent_sort[k]}"] = []
+                z_dim = z[:, dims_to_analyze[k]]
+                correlations[f"latent_{dims_to_analyze[k]}"] = []
                 for label_key in label_keys:
                     corr = latent_correlation_with_label(z_dim.cpu(), analyzer.adata, label_key)
-                    correlations[f"latent_{analyzer.latent_sort[k]}"].extend(corr)
+                    correlations[f"latent_{dims_to_analyze[k]}"].extend(corr)
     return correlations
 
 

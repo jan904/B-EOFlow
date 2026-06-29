@@ -45,6 +45,9 @@ def train_INN(
 
     condition_type = model_config.condition_type
     train_means = model_config.trainable_means
+    supervise_latent_meaning = model_config.supervise_latent_meaning
+    ctrl_idx = model_config.ctrl_idx
+    lam_supervise = model_config.lam_supervise
 
     os.makedirs(os.path.dirname(save_model_path), exist_ok=True)
 
@@ -107,6 +110,8 @@ def train_INN(
             logger.info(f"Condition type: {condition_type}")
             logger.info(f"Trainable means: {train_means}")
             logger.info(f"Learning rate means: {model_config.lr_means}")
+            logger.info(f"Supervise latent meaning: {supervise_latent_meaning}")
+            logger.info(f"Lambda supervise: {lam_supervise}")
             logger.info("---------------------------------------------------------")
             logger.info("")
             logger.info(f"Model Setup:")
@@ -204,7 +209,9 @@ def train_INN(
                 c=c,
                 metrics_last=metrics_last,
                 condition_type=condition_type,
-                trainable_means=train_means,
+                supervise_latent_meaning=supervise_latent_meaning,
+                ctrl_idx=ctrl_idx,
+                lam_supervise=lam_supervise,
             )
             t3 = time.time() - start
             start = time.time()
@@ -273,8 +280,10 @@ def train_INN(
                         sampler,
                         c=c_val,
                         condition_type=condition_type,
-                        trainable_means=train_means,
                         metrics_last=metrics_last,
+                        supervise_latent_meaning=supervise_latent_meaning,
+                        ctrl_idx=ctrl_idx,
+                        lam_supervise=lam_supervise,
                     )
 
                     if torch.isnan(val_loss):

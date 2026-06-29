@@ -34,9 +34,16 @@ def parse_args():
     parser.add_argument("--use_metacells", action="store_true")
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.0)
-    parser.add_argument("--condition_type", type=str, default=None)
+    parser.add_argument("--condition_type", type=str, default=None, choices=["mixture", "normal"])
     parser.add_argument("--train_means", action="store_true")
     parser.add_argument("--lr_means", type=float, default=5e-4)
+    parser.add_argument(
+        "--supervise_latent_meaning",
+        type=str,
+        default=None,
+        choices=["counterfactual", "partition", "both", None],
+    )
+    parser.add_argument("--lam_supervise", type=float, default=0.01)
 
     return parser.parse_args()
 
@@ -50,10 +57,12 @@ def main():
 
     # Data loading and preprocessing
     if args.use_metacells:
-        adata, _, _ = load_data(args.dataset, args.top_genes, log_transform=True, cell_types=None)
+        adata, _, control_label = load_data(
+            args.dataset, args.top_genes, log_transform=True, cell_types=None
+        )
         adata = build_metacells(adata, group_keys=args.conditions)
     else:
-        adata, _, _ = load_data(
+        adata, _, control_label = load_data(
             args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
         )
     dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
@@ -65,6 +74,7 @@ def main():
         label_key=args.conditions,
         test_size=args.test_size,
     )
+    ctrl_idx = dataset.cats[0].categories.tolist().index(control_label)
 
     D_dim = dataset.X.shape[1]
     N_dim = D_dim
@@ -103,7 +113,11 @@ def main():
         model_path += "_counts"
         output_dir_path += "_counts"
 
-    if args.conditions is not None:
+    if args.supervise_latent_meaning is not None:
+        model_path += f"_{args.supervise_latent_meaning}"
+        output_dir_path += f"_{args.supervise_latent_meaning}"
+
+    if args.conditions is not None and args.supervise_latent_meaning is None:
         model_path += "_cond"
         output_dir_path += "_cond"
 
@@ -222,6 +236,9 @@ def main():
             lr_means=args.lr_means,
             means_seperation=2.0,
             n_clusters=len(dataset.cats[0].categories),
+            supervise_latent_meaning=args.supervise_latent_meaning,
+            ctrl_idx=ctrl_idx,
+            lam_supervise=args.lam_supervise,
         )
 
         # Model initialization

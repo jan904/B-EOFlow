@@ -85,9 +85,10 @@ def get_loss(
     sampler,
     c=None,
     condition_type="mixture",
-    trainable_means=False,
     metrics_last=None,
-    momentum=0.9,
+    supervise_latent_meaning=False,
+    ctrl_idx=None,
+    lam_supervise=0.01,
 ):
 
     # If condition_type is 'normal', c is directly used as condition for the flow
@@ -150,18 +151,6 @@ def get_loss(
 
     z, ljd_enc = model(x, c=c_model, rev=False)  # pass through encoder
 
-    # if c is not None and condition_type == "mixture" and trainable_means == False:
-    #     counts = c_prior.sum(dim=0, keepdim=True).T  # [N_cond x 1]
-    #     cluster_sums = c_prior.T @ z  # (K, D) sum of z per cluster
-    #     mask = counts.squeeze() > 0
-
-    #     with torch.no_grad():
-    #         batch_means = cluster_sums[mask] / counts[mask]
-    #         mask = mask.to(device=device)
-    #         model.means[mask] = (1 - momentum) * model.means[mask] + momentum * batch_means.to(
-    #             device=device
-    #         )
-
     t2 = time.time() - start
     start = time.time()
 
@@ -170,6 +159,56 @@ def get_loss(
     start = time.time()
 
     NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
+
+    if supervise_latent_meaning == "counterfactual":
+        assert (
+            ctrl_idx is not None
+        ), "ctrl_idx must be provided when supervise_latent_meaning is True!"
+
+        cond_idx = torch.argmax(c_prior, dim=1)  # [B]
+        c_ctrl = torch.zeros_like(c_prior)
+        c_ctrl[:, ctrl_idx] = 1.0
+
+        mask = torch.ones_like(z)
+        mask.scatter_(1, cond_idx.unsqueeze(1), 0.0)
+        z_ctrl = z * mask
+
+        NLL_z_i_ctrl = get_NLL_z(
+            kwargs_data, z=z_ctrl, c=c_ctrl, means=model.means
+        )  # NLL per dimension
+
+        NLL += lam_supervise * NLL_z_i_ctrl.sum(-1)  # add supervised latent meaning loss
+
+    elif supervise_latent_meaning == "partition":
+        NLL_z_i_cond = get_NLL_z(kwargs_data, z=z[:, :11], c=c_prior, means=model.means[:, :11])
+        NLL_z_i_ctrl = get_NLL_z(kwargs_data, z=z[:, 11:])
+        NLL_z_i = torch.cat([NLL_z_i_cond, NLL_z_i_ctrl], dim=1)
+        NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
+
+    elif supervise_latent_meaning == "both":
+        assert (
+            ctrl_idx is not None
+        ), "ctrl_idx must be provided when supervise_latent_meaning is True!"
+
+        cond_idx = torch.argmax(c_prior, dim=1)  # [B]
+        c_ctrl = torch.zeros_like(c_prior)
+        c_ctrl[:, ctrl_idx] = 1.0
+
+        mask = torch.ones_like(z)
+        mask.scatter_(1, cond_idx.unsqueeze(1), 0.0)
+        z_ctrl = z * mask
+
+        NLL_z_i_cond = get_NLL_z(kwargs_data, z=z[:, :11], c=c_prior, means=model.means[:, :11])
+        NLL_z_i_ctrl = get_NLL_z(kwargs_data, z=z_ctrl[:, :11], c=c_ctrl, means=model.means[:, :11])
+        NLL_z_i_rest = get_NLL_z(kwargs_data, z=z[:, 11:])
+
+        NLL_z_i_cond = torch.cat([NLL_z_i_cond, NLL_z_i_rest], dim=1)
+        NLL_z_i_ctrl = torch.cat([NLL_z_i_ctrl, NLL_z_i_rest], dim=1)
+
+        NLL = (
+            lam_supervise * NLL_z_i_ctrl.sum(-1) + NLL_z_i_cond.sum(-1) - ljd_enc
+        )  # NLL per sample [B]
+
     if use_MER or eval_MEMetrics:
         if mode_MER == "full":
             jac_dec = []
