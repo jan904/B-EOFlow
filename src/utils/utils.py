@@ -35,13 +35,19 @@ def augment_with_noise(X, noise_levels):
     return np.concatenate(X_augmented, axis=0)
 
 
-def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1, use_noise=False):
+def compute_latent_effect(
+    analyzer, batch_size=256, n_latent_factors=1, use_noise=False, latent_dims=None
+):
 
-    if analyzer.latent_sort is None or analyzer.conditions is not None:
-        analyzer.compute_jacobian(use_noise=use_noise)
+    if latent_dims is not None:
+        dims_to_use = latent_dims
+    else:
+        if analyzer.latent_sort is None or analyzer.conditions is not None:
+            analyzer.compute_jacobian(use_noise=use_noise)
+        dims_to_use = analyzer.latent_sort[:n_latent_factors].tolist()
 
     latent_distributions = []
-    for k in tqdm.tqdm(range(n_latent_factors)):
+    for k in tqdm.tqdm(range(len(dims_to_use))):
         effects = []
         for i in range(0, analyzer.adata.X.shape[0], batch_size):
             X_batch = analyzer.adata.X[i : i + batch_size]
@@ -60,13 +66,13 @@ def compute_latent_effect(analyzer, batch_size=256, n_latent_factors=1, use_nois
 
             with torch.no_grad():
                 z, _ = analyzer.flow(X_batch, c=cond_batch, rev=False)
-                z_effect = z[:, analyzer.latent_sort[k]].clone()
+                z_effect = z[:, dims_to_use[k]].clone()
 
             effects.append(z_effect.cpu())
 
         latent_effect = torch.cat(effects, dim=0)
         if n_latent_factors < 16:
-            analyzer.adata.obs[f"latent_{ analyzer.latent_sort[k]}_signed"] = latent_effect.numpy()
+            analyzer.adata.obs[f"latent_{ dims_to_use[k]}_signed"] = latent_effect.numpy()
         latent_distributions.append(latent_effect)
     return analyzer.adata, latent_distributions
 

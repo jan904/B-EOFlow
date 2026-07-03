@@ -81,6 +81,12 @@ class AdataDataset(Dataset):
         y = torch.ones(x.shape[0], dtype=torch.float32) * -1
         return x, y
 
+    def label_to_index(self, label, level=0):
+        return self.cats[level].categories.get_loc(label)
+
+    def index_to_label(self, index, level=0):
+        return self.cats[level].categories[index]
+
 
 # https://www.parsebiosciences.com/datasets/10-million-human-pbmcs-in-a-single-experiment/
 def load_parse_data(

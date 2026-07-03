@@ -43,7 +43,9 @@ def parse_args():
         default=None,
         choices=["counterfactual", "partition", "both", None],
     )
-    parser.add_argument("--lam_supervise", type=float, default=0.01)
+    parser.add_argument("--lam_supervise", type=float, default=1.0)
+    parser.add_argument("--partition_divisor", type=int, default=8)
+    parser.add_argument("--latent_per_condition", type=int, default=None)
 
     return parser.parse_args()
 
@@ -194,8 +196,6 @@ def main():
         model_config = checkpoint["model_config"]
         model, optimizer = get_INN(config=model_config)
         model = model.to(device)
-        if model.means is not None:
-            model.means = model.means.to(device)
 
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         saved_state = checkpoint["model_state_dict"]
@@ -222,6 +222,11 @@ def main():
         start_epoch = checkpoint["epoch"] + 1
 
     else:
+        assert not (
+            args.supervise_latent_meaning in ["partition", "both"]
+            and args.latent_per_condition is None
+        ), "latent_per_condition must be specified when supervise_latent_meaning is 'partition' or 'both'."
+
         model_config = ModelConfig(
             N_dim=N_dim,
             condition_shapes=condition_shapes,
@@ -239,13 +244,13 @@ def main():
             supervise_latent_meaning=args.supervise_latent_meaning,
             ctrl_idx=ctrl_idx,
             lam_supervise=args.lam_supervise,
+            latent_per_condition=args.latent_per_condition,
+            partition_divisor=args.partition_divisor,
         )
 
         # Model initialization
         model, optimizer = get_INN(config=model_config)
         model = model.to(device)
-        if model.means is not None:
-            model.means = model.means.to(device)
         print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))

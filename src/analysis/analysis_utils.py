@@ -369,6 +369,7 @@ def analyze_result(
     computation_batch_size=1024,
     analyze_conditions=False,
     use_noise=False,
+    latent_dims=None,
 ):
 
     covariates = None
@@ -417,6 +418,7 @@ def analyze_result(
             n_latent_factors=n_latent_factors,
             batch_size=computation_batch_size,
             use_noise=use_noise,
+            latent_dims=latent_dims,
         )
 
         pca_data_entropy, flow_data_entropy = compare_data_entropy(subset_analyzer, latent_sort_pca)
@@ -435,7 +437,7 @@ def analyze_result(
         # Plot data colored by latent effect of EOFlow and PCA
         compare_latent_effects(
             subset_analyzer.adata,
-            subset_analyzer.latent_sort,
+            subset_analyzer.latent_sort if latent_dims is None else latent_dims,
             plot_dir=subset_analyzer.plot_dir,
             n_latent_factors=n_latent_factors,
             vmax=vmax,
@@ -601,8 +603,6 @@ def get_INN_from_checkpoint(
     model_config = checkpoint["model_config"]
     model, optimizer = get_INN(model_config)
     model = model.to(device)
-    if model.means is not None:
-        model.means = model.means.to(device)
 
     saved_state = checkpoint["model_state_dict"]
     # Remap old keys (no 'flow.' prefix) to new wrapped keys
@@ -694,7 +694,7 @@ def return_bottleneck_representation(
 def compare_data_entropy(analyzer, pca_variance):
 
     if analyzer.H is None:
-        analyzer.calculate_jacobian()
+        analyzer.compute_jacobian()
 
     H_pca = 1 / 2 * (analyzer.adata.n_vars + np.log(pca_variance).sum())
     H_flow = analyzer.H.mean()

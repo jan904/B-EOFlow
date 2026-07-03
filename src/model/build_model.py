@@ -45,6 +45,8 @@ class ModelConfig:
     supervise_latent_meaning: bool = False
     ctrl_idx: int = None
     lam_supervise: float = 0.01
+    latent_per_condition: int = None
+    partition_divisor: int = 8
 
     def __post_init__(self):
         if self.condition_shapes is not None and self.condition_type is None:
@@ -60,11 +62,11 @@ class ModelConfig:
 
 
 def get_param_groups(model, config):
-    other_params = [p for name, p in model.named_parameters() if name != "means"]
+    other_params = [p for name, p in model.named_parameters() if name != "means_active"]
     param_groups = [{"params": other_params, "lr": config.lr}]
 
-    if model.means is not None and model.means.requires_grad:
-        param_groups.append({"params": [model.means], "lr": config.lr_means})
+    if model.means_active is not None and model.means_active.requires_grad:
+        param_groups.append({"params": [model.means_active], "lr": config.lr_means})
 
     return param_groups
 
@@ -78,18 +80,48 @@ class INNWithMixturePrior(nn.Module):
         condition_type=None,
         trainable_means=False,
         means_seperation=2.0,
+        latent_per_condition=None,
     ):
         super().__init__()
         self.flow = flow
+        self.means_dim = N_dim
+        self.N_dim = N_dim
+
         if condition_type == "mixture":
             if n_components is None:
                 raise ValueError("n_components must be specified for mixture condition type.")
-            means = torch.zeros(n_components, N_dim)
-            torch.nn.init.orthogonal_(means)
-            means = means * N_dim**0.5 * means_seperation
-            self.means = torch.nn.Parameter(means, requires_grad=trainable_means)
+            if latent_per_condition is not None:
+                if latent_per_condition * n_components > N_dim:
+                    raise ValueError(
+                        f"latent_per_condition * n_components ({latent_per_condition * n_components}) "
+                        f"cannot exceed N_dim ({N_dim})."
+                    )
+                self.means_dim = latent_per_condition * n_components
+
+            # learnable part: (n_components, means_dim)
+            means_active = torch.zeros(n_components, self.means_dim)
+            torch.nn.init.orthogonal_(means_active)
+            means_active = means_active * N_dim**0.5 * means_seperation
+            self.means_active = torch.nn.Parameter(means_active, requires_grad=trainable_means)
+
+            # fixed zero padding: (n_components, N_dim - means_dim)
+            if self.means_dim < N_dim:
+                self.register_buffer(
+                    "means_zero", torch.zeros(n_components, N_dim - self.means_dim)
+                )
+            else:
+                self.means_zero = None
         else:
-            self.means = None
+            self.means_active = None
+            self.means_zero = None
+
+    @property
+    def means(self):
+        if self.means_active is None:
+            return None
+        if self.means_zero is None:
+            return self.means_active
+        return torch.cat([self.means_active, self.means_zero], dim=1)
 
     def forward(self, x, c=None, rev=False):
         return self.flow(x, c=c, rev=rev)
@@ -176,6 +208,7 @@ def get_INN(config):
         condition_type=config.condition_type,
         trainable_means=config.trainable_means,
         means_seperation=config.means_seperation,
+        latent_per_condition=config.latent_per_condition,
     )
 
     param_groups = get_param_groups(model, config)
