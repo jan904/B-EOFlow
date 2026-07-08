@@ -198,3 +198,74 @@ def get_linear_INN(
         raise NotImplementedError(f"Optimizer type {optimizer_type} not implemented.")
 
     return flow, optimizer_flow
+
+
+def get_INN(config):
+    flow = Ff.SequenceINN(config.N_dim)
+
+    subnet_fc = config.subnet_fc
+    if config.subnet_fc == None:
+        subnet_fc = lambda c_in, c_out: get_subnet_fc(
+            c_in,
+            c_out,
+            act_func=config.act_func,
+            ch_hidden=config.ch_hidden,
+            layers=config.n_hidden_layers,
+        )
+
+    if config.condition_shapes is None:
+        cond = None
+        cond_shape = None
+    elif config.condition_type == "mixture":
+        cond = None
+        cond_shape = None
+
+    else:
+        cond = 0
+        cond_shape = config.condition_shapes
+
+    if config.pre_normalize:
+        flow.append(Fm.ActNorm)
+    if config.pre_rotate:
+        flow.append(Orthogonal)
+
+    if config.coupling_block_type:
+        for k in range(config.N_blocks):
+            if config.coupling_block_type == "GLOW":
+                flow.append(
+                    Fm.GLOWCouplingBlock,
+                    cond=cond,
+                    cond_shape=cond_shape,
+                    subnet_constructor=subnet_fc,
+                    clamp=config.clamp,
+                )
+            elif config.coupling_block_type == "RQS":
+                flow.append(
+                    Fms.RationalQuadraticSpline,
+                    cond=cond,
+                    cond_shape=cond_shape,
+                    bins=config.RQS_bins,
+                    subnet_constructor=subnet_fc,
+                )  # bins=3,
+                # flow.append(Fm.HouseholderPerm, n_reflections=4)
+            # elif coupling_block_type == 'GIN':
+            #     flow.append(Fm.GINCouplingBlock, cond=cond, cond_shape=cond_shape, subnet_constructor=subnet_fc)
+            # elif coupling_block_type == 'NICE':
+            #     flow.append(Fm.NICECouplingBlock, cond=cond, cond_shape=cond_shape, subnet_constructor=subnet_fc)
+            # elif coupling_block_type == 'None':
+            #     pass
+            # else:
+            #     flow.append(Fm.GLOWCouplingBlock, cond=cond, cond_shape=cond_shape, subnet_constructor=subnet_fc)
+
+            if config.permute_random:
+                flow.append(Fm.PermuteRandom)
+            if config.normalize:
+                flow.append(Fm.ActNorm)
+            if config.rotate_random and not (k == config.N_blocks - 1):
+                M = torch.linalg.qr(torch.randn(config.N_dim, config.N_dim))[0]
+                flow.append(Fm.FixedLinearTransform, M=M)
+
+    if config.post_rotate:
+        flow.append(Orthogonal)
+
+    return flow

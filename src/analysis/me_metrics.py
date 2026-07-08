@@ -6,7 +6,7 @@ from torch.autograd import grad
 from tqdm import tqdm
 
 from src.utils.utils import print_mem
-from src.model.loss_utils import get_NLL_z
+from src.model.INN.INN_losses import get_NLL_z
 
 
 def get_jacobian(

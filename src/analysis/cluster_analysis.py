@@ -12,12 +12,12 @@ from src.model.data_utils import create_latent_adata
 
 
 def plot_latent_means_umap(analyzer, umap_2d=None):
-    means = analyzer.flow.means.detach().cpu().numpy()  # (K, D)
+    means = analyzer.model.means.detach().cpu().numpy()  # (K, D)
 
     dataset = analyzer.kwargs_data["dataset"]
     labels = dataset.cats[0].categories.tolist()  # product state labels for means
 
-    latent_adata = create_latent_adata(analyzer.adata, analyzer.flow, analyzer.device)
+    latent_adata = create_latent_adata(analyzer.adata, analyzer.model, analyzer.device)
     Z = latent_adata.X
 
     # compute UMAP once and reuse across plots
@@ -107,7 +107,7 @@ def plot_latent_means_umap(analyzer, umap_2d=None):
 
 
 def plot_pairwise_distances(analyzer, metric="euclidean", log_scale=False, order=None):
-    means = analyzer.flow.means.detach().cpu().numpy()  # (K, D)
+    means = analyzer.model.means.detach().cpu().numpy()  # (K, D)
     dataset = analyzer.kwargs_data["dataset"]
     labels = dataset.cats[0].categories.tolist()
 
@@ -182,8 +182,8 @@ def plot_pairwise_distances(analyzer, metric="euclidean", log_scale=False, order
 
 
 def plot_encoded_means_pca(analyzer):
-    encoded_means, _ = analyzer.flow(
-        analyzer.flow.means.to(analyzer.device),
+    encoded_means, _ = analyzer.model(
+        analyzer.model.means.to(analyzer.device),
         rev=False,
     )
 

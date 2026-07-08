@@ -65,7 +65,7 @@ def compute_latent_effect(
                 cond_batch = None
 
             with torch.no_grad():
-                z, _ = analyzer.flow(X_batch, c=cond_batch, rev=False)
+                z, _ = analyzer.model(X_batch, c=cond_batch, rev=False)
                 z_effect = z[:, dims_to_use[k]].clone()
 
             effects.append(z_effect.cpu())
@@ -227,7 +227,7 @@ def compute_correlations(
                 c = [cond.to(device=analyzer.device, dtype=analyzer.dtype) for cond in c]
             else:
                 c = None
-            z, _ = analyzer.flow(x, c=c, rev=False)
+            z, _ = analyzer.model(x, c=c, rev=False)
             correlations = {}
             for k in range(n_latents):
                 z_dim = z[:, dims_to_analyze[k]]

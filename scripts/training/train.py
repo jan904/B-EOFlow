@@ -9,7 +9,7 @@ from src.model.data_utils import (
     get_condition_shapes,
     build_metacells,
 )
-from src.model.training_utils import train_INN
+from src.model.training import train_model
 from src.model.build_model import get_INN, ModelConfig
 
 
@@ -266,7 +266,7 @@ def main():
         print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
-    model, optimizer, metrics_loss, val_metrics_loss, log_path = train_INN(
+    model, optimizer, metrics_loss, val_metrics_loss, log_path = train_model(
         model,
         optimizer,
         metrics_loss,

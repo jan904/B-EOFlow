@@ -133,7 +133,7 @@ def _reconstruct_flow(
         if use_noise:
             x_batch = x_batch + torch.randn_like(x_batch) * analyzer.sigma_noise
         with torch.no_grad():
-            z, _ = analyzer.flow(x_batch, rev=False)
+            z, _ = analyzer.model(x_batch, rev=False)
             if perm_module is not None:
                 P = perm_module.get_permutation_matrix()
                 hard = torch.zeros_like(P)
@@ -146,7 +146,7 @@ def _reconstruct_flow(
             else:
                 z[:, analyzer.latent_sort[keep_dim:]] = 0
 
-            x_rec, _ = analyzer.flow(z, rev=True)
+            x_rec, _ = analyzer.model(z, rev=True)
         x_recon.append(x_rec)
     return torch.cat(x_recon, dim=0).cpu().numpy().clip(min=0)
 

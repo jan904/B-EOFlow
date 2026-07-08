@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from tqdm import tqdm
+from dataclasses import asdict
 
 import importlib
 import sys
@@ -9,7 +10,7 @@ import time
 
 from sklearn.cluster import KMeans
 
-from src.model.loss_utils import (
+from src.model.INN.INN_losses import (
     get_loss,
     round_loss,
     DimensionSampler,
@@ -17,11 +18,6 @@ from src.model.loss_utils import (
     build_regularization_loss_string,
 )
 from src.utils.logger import get_logger
-
-try:
-    importlib.reload(sys.modules["src.model.loss_utils"])
-except KeyError:
-    pass
 
 
 def train_INN(
@@ -325,7 +321,7 @@ def train_INN(
                     "log_path": log_path,
                     "counts": use_counts,
                     "conditions": conditions,
-                    "model_config": model_config,
+                    "model_config": asdict(model_config),
                 }
                 torch.save(checkpoint, save_model_path)
                 logger.info("Saving checkpoint to " + save_model_path)
@@ -350,7 +346,7 @@ def train_INN(
                     "log_path": log_path,
                     "counts": use_counts,
                     "conditions": conditions,
-                    "model_config": model_config,
+                    "model_config": asdict(model_config),
                 }
                 torch.save(checkpoint, save_model_path)
                 logger.info("Saving checkpoint to " + save_model_path)
@@ -367,7 +363,7 @@ def train_INN(
             "log_path": log_path,
             "counts": use_counts,
             "conditions": conditions,
-            "model_config": model_config,
+            "model_config": asdict(model_config),
         }
         torch.save(checkpoint, save_model_path)
         logger.info("Finished training. Saving model to " + save_model_path)

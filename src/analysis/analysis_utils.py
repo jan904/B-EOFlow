@@ -31,18 +31,18 @@ from src.utils.utils import (
     augment_with_noise,
     load_scvi,
 )
-from src.model.build_model import get_INN
+from src.model.build_model import get_model, remap_keys, init_config
 from sklearn.decomposition import PCA
 import sys
 
 from scipy.stats import skew, kurtosis
 
 
-class FlowAnalyser:
+class Analyzer:
     def __init__(
         self,
         adata,
-        flow,
+        model,
         kwargs_data,
         labels_key,
         control_label,
@@ -60,7 +60,7 @@ class FlowAnalyser:
         test_size=0.1,
     ):
         self.adata = adata
-        self.flow = flow
+        self.model = model
         self.kwargs_data = kwargs_data
         self.device = kwargs_data["device"]
         self.dtype = kwargs_data["dtype"]
@@ -124,10 +124,10 @@ class FlowAnalyser:
         D_dim = dataset.X.shape[1]
         N_dim = D_dim
 
-        model_path, plot_dir, log_dir, csv_dir = FlowAnalyser._build_dirs(
+        model_path, plot_dir, log_dir, csv_dir = Analyzer._build_dirs(
             dataset_name, lam_MTC, sigma_noise, N_dim, prefix=prefix, folder_postfix=folder_postfix
         )
-        kwargs_data, kwargs_loss, metrics_loss = FlowAnalyser._build_kwargs(
+        kwargs_data, kwargs_loss, metrics_loss = Analyzer._build_kwargs(
             device,
             dtype,
             N_dim,
@@ -140,7 +140,7 @@ class FlowAnalyser:
         )
 
         if os.path.exists(model_path):
-            flow, _, metrics_loss, val_metrics_loss, model_config = get_INN_from_checkpoint(
+            flow, _, metrics_loss, val_metrics_loss, model_config = get_model_from_checkpoint(
                 model_path, device=device
             )
         else:
@@ -149,7 +149,7 @@ class FlowAnalyser:
         if adata.obsm.get("X_scVI_un") is None:
             load_scvi(adata, dataset_name, N_dim)
 
-        return FlowAnalyser(
+        return Analyzer(
             adata,
             flow,
             kwargs_data,
@@ -302,7 +302,7 @@ class FlowAnalyser:
         if self.latent_sort is None and self.conditions is not None:
             self.compute_jacobian(use_noise=use_noise)
 
-        return FlowAnalyser(
+        return Analyzer(
             self.adata[mask],
             self.flow,
             self.kwargs_data,
@@ -521,7 +521,7 @@ def analyze_model(
     use_noise=False,
 ):
 
-    analyzer = FlowAnalyser.from_checkpoint(
+    analyzer = Analyzer.from_checkpoint(
         adata,
         dataset_name,
         labels_key,
@@ -587,7 +587,7 @@ def analyze_model(
     return analyzer.H_i, analyzer.latent_sort
 
 
-def get_INN_from_checkpoint(
+def get_model_from_checkpoint(
     checkpoint_path,
     device,
 ):
@@ -602,28 +602,16 @@ def get_INN_from_checkpoint(
     )
 
     model_config = checkpoint["model_config"]
-    model, optimizer = get_INN(model_config)
+    model_config = init_config(model_config)
+
+    model, optimizer = get_model(model_config)
     model = model.to(device)
 
     saved_state = checkpoint["model_state_dict"]
 
-    saved_state = checkpoint["model_state_dict"]
-
-    remapped_state = {}
-    for k, v in saved_state.items():
-        if k == "means":
-            remapped_state["means_active"] = v  # remap old key to new name
-        elif not k.startswith("flow.") and not k.startswith("means"):
-            remapped_state[f"flow.{k}"] = v
-        else:
-            remapped_state[k] = v
-
-    missing, unexpected = model.load_state_dict(remapped_state, strict=False)
-    non_prior_missing = [k for k in missing if not k.startswith("means")]
-    if non_prior_missing:
-        print(f"WARNING: unexpected missing keys: {non_prior_missing}")
-    else:
-        print(f"Loaded successfully. Missing/fresh keys: {missing}")
+    ## TODO: Remove fix
+    # model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    model = remap_keys(model, saved_state)
 
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
@@ -656,7 +644,7 @@ def return_bottleneck_representation(
             raise ValueError(
                 "Must provide either analyzer or all of: adata, dataset_name, labels_key, control_label, lam_MTC, sigma_noise"
             )
-        analyzer = FlowAnalyser.from_checkpoint(
+        analyzer = Analyzer.from_checkpoint(
             adata,
             dataset_name,
             labels_key,
@@ -680,7 +668,7 @@ def return_bottleneck_representation(
             c = None
         x = torch.tensor(x, device=analyzer.device, dtype=analyzer.dtype)
 
-        z, _ = analyzer.flow(x, c=c, rev=False)
+        z, _ = analyzer.model(x, c=c, rev=False)
         latent_representation.append(z.cpu().detach().numpy())
     latent_representation = np.concatenate(latent_representation, axis=0)
 
@@ -781,7 +769,7 @@ def check_analyzer_params(
     if analyzer is None:
         return False
 
-    expected_path, _, _, _ = FlowAnalyser._build_dirs(
+    expected_path, _, _, _ = Analyzer._build_dirs(
         dataset_name, lam_MTC, sigma_noise, N_dim, prefix=prefix, folder_postfix=folder_postfix
     )
 
