@@ -23,12 +23,13 @@ def train_classifier(
     classifier,
     train_loader,
     val_loader,
+    weights,
     device,
     dtype=torch.float32,
     num_epochs=20,
     learning_rate=1e-3,
 ):
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=weights)
     optimizer = torch.optim.Adam(classifier.parameters(), lr=learning_rate)
 
     best_val_accuracy = 0

@@ -55,7 +55,7 @@ def round_loss(loss, round=4):
         return np.round(loss.item(), round)
 
 
-def get_NLL_z(kwargs_data, z=None, c=None, means=None):
+def get_NLL_z(kwargs_data, z=None, c=None, means=None, log_sigma=None):
     # Assume standard normal prior p(z)
     # Compute the negative log-likelihood (NLL) using samples z per dimension. Alternatively this is the entropy of p_i(z_i) if z is None
     N_dim = kwargs_data["N_dim"]
@@ -71,7 +71,16 @@ def get_NLL_z(kwargs_data, z=None, c=None, means=None):
         mu = c @ means
         if z is None:
             z = torch.ones_like(mu)
-        return 1 / 2 * ((z - mu) ** 2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
+
+        if log_sigma is None:
+            return 1 / 2 * ((z - mu) ** 2)  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
+
+        log_sigma = c @ log_sigma.unsqueeze(1)
+        sigma = torch.exp(log_sigma)
+
+        return (
+            1 / 2 * ((z - mu) / sigma) ** 2 + log_sigma
+        )  # + torch.tensor(1 / 2 * np.log(2 * np.pi))
 
 
 import time
@@ -154,7 +163,9 @@ def get_loss(
     t3 = time.time() - start
     start = time.time()
 
-    NLL_z_i = get_NLL_z(kwargs_data, z=z, c=c_prior, means=model.means)  # NLL per dimension
+    NLL_z_i = get_NLL_z(
+        kwargs_data, z=z, c=c_prior, means=model.means, log_sigma=model.log_sigma
+    )  # NLL per dimension
     NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
 
     if model_config.supervise_latent_meaning == "counterfactual":
@@ -171,7 +182,7 @@ def get_loss(
         z_ctrl = z * mask
 
         NLL_z_i_ctrl = get_NLL_z(
-            kwargs_data, z=z_ctrl, c=c_ctrl, means=model.means
+            kwargs_data, z=z_ctrl, c=c_ctrl, means=model.means, log_sigma=model.log_sigma
         )  # NLL per dimension
 
         NLL += model_config.lam_supervise * NLL_z_i_ctrl.sum(
@@ -179,7 +190,9 @@ def get_loss(
         )  # add supervised latent meaning loss
 
     elif model_config.supervise_latent_meaning == "partition":
-        NLL_z_i = get_NLL_z(kwargs_data, z=z, c=c_prior, means=model.means)
+        NLL_z_i = get_NLL_z(
+            kwargs_data, z=z, c=c_prior, means=model.means, log_sigma=model.log_sigma
+        )  # NLL per dimension
 
         factor = (z.shape[1] - 11) / len(model.means_active) / model_config.partition_divisor
         weight = torch.ones(N_dim, device=device)

@@ -162,6 +162,7 @@ class FlowAnalyser:
             conditions=conditions,
             checkpoint_path=model_path,
             condition_type=model_config.condition_type,
+            test_size=test_size,
         )
 
     @staticmethod
@@ -605,23 +606,24 @@ def get_INN_from_checkpoint(
     model = model.to(device)
 
     saved_state = checkpoint["model_state_dict"]
-    # Remap old keys (no 'flow.' prefix) to new wrapped keys
-    # Keys already prefixed with 'flow.' or 'prior.' are left untouched (future checkpoints)
+
+    saved_state = checkpoint["model_state_dict"]
+
     remapped_state = {}
     for k, v in saved_state.items():
-        if not k.startswith("flow.") and not k.startswith("means"):
+        if k == "means":
+            remapped_state["means_active"] = v  # remap old key to new name
+        elif not k.startswith("flow.") and not k.startswith("means"):
             remapped_state[f"flow.{k}"] = v
         else:
             remapped_state[k] = v
 
     missing, unexpected = model.load_state_dict(remapped_state, strict=False)
-
-    # Only the prior keys should be missing — anything else is a real problem
     non_prior_missing = [k for k in missing if not k.startswith("means")]
     if non_prior_missing:
         print(f"WARNING: unexpected missing keys: {non_prior_missing}")
     else:
-        print(f"Flow weights loaded. Prior initialised fresh ({len(missing)} new params).")
+        print(f"Loaded successfully. Missing/fresh keys: {missing}")
 
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 

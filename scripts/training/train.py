@@ -46,6 +46,8 @@ def parse_args():
     parser.add_argument("--lam_supervise", type=float, default=1.0)
     parser.add_argument("--partition_divisor", type=int, default=8)
     parser.add_argument("--latent_per_condition", type=int, default=None)
+    parser.add_argument("--train_sigma", action="store_true")
+    parser.add_argument("--lr_sigma", type=float, default=5e-4)
 
     return parser.parse_args()
 
@@ -110,30 +112,37 @@ def main():
         model_name = default_name + "_model.pt"
         output_dir_name = default_name
 
-    # If use_counts is True, append "_counts" to model name and output dir name
-    if args.use_counts:
-        model_path += "_counts"
-        output_dir_path += "_counts"
+    model_path += "_best"
+    output_dir_path += "_best"
 
-    if args.supervise_latent_meaning is not None:
-        model_path += f"_{args.supervise_latent_meaning}"
-        output_dir_path += f"_{args.supervise_latent_meaning}"
+    # if args.train_sigma:
+    #     model_path += "_train_sigma"
+    #     output_dir_path += "_train_sigma"
+    # else:
+    #     # If use_counts is True, append "_counts" to model name and output dir name
+    #     if args.use_counts:
+    #         model_path += "_counts"
+    #         output_dir_path += "_counts"
 
-    if args.conditions is not None and args.supervise_latent_meaning is None:
-        model_path += "_cond"
-        output_dir_path += "_cond"
+    #     if args.supervise_latent_meaning is not None:
+    #         model_path += f"_{args.supervise_latent_meaning}"
+    #         output_dir_path += f"_{args.supervise_latent_meaning}"
 
-        if args.condition_type is not None:
-            model_path += f"_{args.condition_type}"
-            output_dir_path += f"_{args.condition_type}"
+    #     if args.conditions is not None and args.supervise_latent_meaning is None:
+    #         model_path += "_cond"
+    #         output_dir_path += "_cond"
 
-            if args.condition_type == "mixture":
-                if args.train_means == True:
-                    model_path += f"_train_means"
-                    output_dir_path += f"_train_means"
-                else:
-                    model_path += "_empirical"
-                    output_dir_path += "_empirical"
+    #         if args.condition_type is not None:
+    #             model_path += f"_{args.condition_type}"
+    #             output_dir_path += f"_{args.condition_type}"
+
+    #             if args.condition_type == "mixture":
+    #                 if args.train_means == True:
+    #                     model_path += f"_train_means"
+    #                     output_dir_path += f"_train_means"
+    #                 else:
+    #                     model_path += "_empirical"
+    #                     output_dir_path += "_empirical"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -191,6 +200,7 @@ def main():
         checkpoint = torch.load(
             os.path.join(model_path, model_name),
             map_location=device,
+            weights_only=False,
         )
 
         model_config = checkpoint["model_config"]
@@ -246,6 +256,8 @@ def main():
             lam_supervise=args.lam_supervise,
             latent_per_condition=args.latent_per_condition,
             partition_divisor=args.partition_divisor,
+            trainable_sigma=args.train_sigma,
+            lr_sigma=args.lr_sigma,
         )
 
         # Model initialization

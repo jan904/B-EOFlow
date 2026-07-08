@@ -47,6 +47,9 @@ class ModelConfig:
     lam_supervise: float = 0.01
     latent_per_condition: int = None
     partition_divisor: int = 8
+    trainable_sigma: bool = False
+    init_sigma: float = 1.0
+    lr_sigma: float = 5e-4
 
     def __post_init__(self):
         if self.condition_shapes is not None and self.condition_type is None:
@@ -62,11 +65,27 @@ class ModelConfig:
 
 
 def get_param_groups(model, config):
-    other_params = [p for name, p in model.named_parameters() if name != "means_active"]
+    other_params = [
+        p for name, p in model.named_parameters() if name not in {"means_active", "log_sigma"}
+    ]
+
     param_groups = [{"params": other_params, "lr": config.lr}]
 
-    if model.means_active is not None and model.means_active.requires_grad:
-        param_groups.append({"params": [model.means_active], "lr": config.lr_means})
+    if model.means_active is not None:
+        param_groups.append(
+            {
+                "params": [model.means_active],
+                "lr": config.lr_means,
+            }
+        )
+
+    if model.log_sigma is not None:
+        param_groups.append(
+            {
+                "params": [model.log_sigma],
+                "lr": config.lr_sigma,
+            }
+        )
 
     return param_groups
 
@@ -79,6 +98,8 @@ class INNWithMixturePrior(nn.Module):
         n_components=None,
         condition_type=None,
         trainable_means=False,
+        trainable_sigma=False,
+        init_sigma=1.0,
         means_seperation=2.0,
         latent_per_condition=None,
     ):
@@ -104,6 +125,17 @@ class INNWithMixturePrior(nn.Module):
             means_active = means_active * N_dim**0.5 * means_seperation
             self.means_active = torch.nn.Parameter(means_active, requires_grad=trainable_means)
 
+            self.log_sigma = None
+            if trainable_sigma:
+                log_sigma = torch.full(
+                    (n_components,),
+                    float(torch.log(torch.tensor(init_sigma))),
+                )
+                self.log_sigma = nn.Parameter(
+                    log_sigma,
+                    requires_grad=trainable_sigma,
+                )
+
             # fixed zero padding: (n_components, N_dim - means_dim)
             if self.means_dim < N_dim:
                 self.register_buffer(
@@ -114,6 +146,7 @@ class INNWithMixturePrior(nn.Module):
         else:
             self.means_active = None
             self.means_zero = None
+            self.log_sigma = None
 
     @property
     def means(self):
@@ -209,6 +242,8 @@ def get_INN(config):
         trainable_means=config.trainable_means,
         means_seperation=config.means_seperation,
         latent_per_condition=config.latent_per_condition,
+        trainable_sigma=config.trainable_sigma,
+        init_sigma=config.init_sigma,
     )
 
     param_groups = get_param_groups(model, config)
