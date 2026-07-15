@@ -4843,6 +4843,7 @@ dependencies = [
     { name = "pydeseq2" },
     { name = "pymc" },
     { name = "scanpy" },
+    { name = "scgen" },
     { name = "schedulefree" },
     { name = "scib-metrics" },
     { name = "scikit-misc" },
@@ -4888,6 +4889,7 @@ requires-dist = [
     { name = "pydeseq2", specifier = ">=0.5.4" },
     { name = "pymc", specifier = ">=5.28.2" },
     { name = "scanpy", specifier = ">=1.11.5" },
+    { name = "scgen", specifier = ">=2.1.0" },
     { name = "schedulefree", specifier = ">=1.4.1" },
     { name = "scib-metrics", specifier = ">=0.5.9" },
     { name = "scikit-misc", specifier = ">=0.5.2" },
@@ -4929,6 +4931,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d2/a8/285f1a9c995906b7e0ae3c399208fe67cfba8126dd31359dfef0908f6edc/scanpy-1.11.5.tar.gz", hash = "sha256:b2ef5476dfb1144b7dd0fae90b0198699c7988e6b27f083904150642c7ba6b89", size = 14088122, upload-time = "2025-10-21T08:24:43.999Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/e9/c1d43543da87cd27e8e2a74db85cf0b6c5cff2d5f04a86bd584d2fbc2bb0/scanpy-1.11.5-py3-none-any.whl", hash = "sha256:fcd383ddcf7acbf7c0ca232c25ad51b00aec9f8d2f7c8954b8c6ee0962257166", size = 2097836, upload-time = "2025-10-21T08:24:41.741Z" },
+]
+
+[[package]]
+name = "scgen"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "adjusttext" },
+    { name = "anndata" },
+    { name = "scanpy" },
+    { name = "scvi-tools" },
+    { name = "seaborn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/eb/50/1dd661a53115498b3a9bc4d08a899ee63cb860fad70e4a775bd526622911/scgen-2.1.0.tar.gz", hash = "sha256:0f3f23ee596b20906c22b6a324ca930b70b78c93e18d9c1846214ee84ab872bf", size = 25041, upload-time = "2022-04-25T17:02:52.982Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/94/3aaa9d873964852535af09b9ee12958e3ffda8ed25aec95635e9b133ca00/scgen-2.1.0-py3-none-any.whl", hash = "sha256:1cf2efc967feca0940e00e539e1e0c4115aead2110b0890d83cd42e006d9cc5e", size = 24388, upload-time = "2022-04-25T17:02:50.704Z" },
 ]
 
 [[package]]

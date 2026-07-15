@@ -37,6 +37,7 @@ dependencies = [
     "pydeseq2>=0.5.4",
     "pymc>=5.28.2",
     "scanpy>=1.11.5",
+    "scgen>=2.1.0",
     "schedulefree>=1.4.1",
     "scib-metrics>=0.5.9",
     "scikit-misc>=0.5.2",
