@@ -158,6 +158,61 @@ def generate_counterfactuals(analyzer, key):
     return all_x_cf, all_z_cf, all_source_labels, key
 
 
+def generate_counterfactuals_scgen(analyzer, key):
+    """scGen counterpart to generate_counterfactuals: for every other condition
+    ("source"), uses SCGEN.predict (official ctrl -> stim latent-arithmetic) to
+    predict what each source cell would look like under `key`.
+
+    analyzer.model must be a trained scgen.SCGEN (or SCGENMixturePriorWrapper around
+    one) registered via `setup_anndata(adata, batch_key=<condition column>,
+    labels_key=<cell type column>)`, since `.predict` reads the condition from the
+    registered batch_key. analyzer.labels_key must match that batch_key.
+
+    analyzer.adata holds the same raw counts scGen was trained/registered on, so
+    `.predict`/`.get_latent_representation` are called unconverted. The returned x_cfs
+    is log1p'd before returning (clamped to 0 first, since scGen's decoder has no
+    positivity constraint and can predict negative values) so it's comparable to the
+    log-space INN/scVI pipeline - see mmd.ctrl_mmd_dists/mmd_dists (log1p_transform=True)
+    for how the "real" data it gets compared against is logged to match.
+    """
+    adata = analyzer.adata
+    labels_key = analyzer.labels_key
+
+    cats = adata.obs[f"{labels_key}"].astype("category").cat.categories.tolist()
+    if key not in cats:
+        raise ValueError(f"key '{key}' not found in adata.obs['{labels_key}']")
+
+    all_x_cf = []
+    all_z_cf = []
+    all_source_labels = []
+
+    for source in cats:
+        if source == key:
+            continue
+
+        adata_source = adata[adata.obs[f"{labels_key}"] == source].copy()
+        if adata_source.n_obs == 0:
+            continue
+
+        pred_adata, delta = analyzer.model.predict(
+            ctrl_key=source,
+            stim_key=key,
+            adata_to_predict=adata_source,
+        )
+
+        z_source = analyzer.model.get_latent_representation(adata_source)
+        x_cf_log = np.log1p(np.clip(pred_adata.X, a_min=0, a_max=None))
+
+        all_x_cf.append(torch.tensor(x_cf_log, dtype=torch.float32))
+        all_z_cf.append(torch.tensor(z_source + delta, dtype=torch.float32))
+        all_source_labels.extend([source] * adata_source.n_obs)
+
+    x_cfs = torch.cat(all_x_cf, dim=0)
+    z_cfs = torch.cat(all_z_cf, dim=0)
+
+    return x_cfs, z_cfs, all_source_labels, key
+
+
 def init_classifier(analyzer, key, binary_key=None, latent=False, hidden_dim=None, labels_key=None):
 
     if labels_key is None:
@@ -216,13 +271,19 @@ def evaluate_training_error(analyzer, adata_train, labels_key, num_classes, clas
 
 
 def evaluate_cfs_classification(
-    analyzer, classifier, key, train_dataset, latent=False, labels_key=None
+    analyzer,
+    classifier,
+    key,
+    train_dataset,
+    latent=False,
+    labels_key=None,
+    cf_fn=generate_counterfactuals,
 ):
 
     if labels_key is None:
         labels_key = analyzer.labels_key
 
-    x_cfs, z_cfs, all_source_labels, key_mean = generate_counterfactuals(analyzer, key=key)
+    x_cfs, z_cfs, all_source_labels, key_mean = cf_fn(analyzer, key=key)
     adata_cf = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] != key].copy()
 
     if latent:

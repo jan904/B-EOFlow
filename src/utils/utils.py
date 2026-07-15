@@ -308,3 +308,21 @@ def check_adata_params(adata, dataset_name, top_genes, log_transform=True, cell_
         and params["log_transform"] == log_transform
         and params["cell_types"] == cell_types
     )
+
+
+def extract_top_genes(analyzer, key, top_n=10, log1p_transform=False):
+    adata = analyzer.adata.copy()
+    adata.X = adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X
+    if log1p_transform:
+        adata.X = np.log1p(adata.X)
+
+    sc.tl.rank_genes_groups(adata, groupby=analyzer.labels_key, method="wilcoxon")
+
+    # top genes specifically for your group of interest (`key`)
+    top_genes_df = sc.get.rank_genes_groups_df(adata, group=key)
+    top_genes_df = top_genes_df.sort_values("scores", ascending=False)
+
+    top_gene_names = top_genes_df["names"].head(top_n).tolist()
+    gene_indices = adata.var_names.get_indexer(top_gene_names)
+
+    return top_gene_names, gene_indices
