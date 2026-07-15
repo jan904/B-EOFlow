@@ -4889,7 +4889,7 @@ requires-dist = [
     { name = "pydeseq2", specifier = ">=0.5.4" },
     { name = "pymc", specifier = ">=5.28.2" },
     { name = "scanpy", specifier = ">=1.11.5" },
-    { name = "scgen", specifier = ">=2.1.0" },
+    { name = "scgen", git = "https://github.com/theislab/scgen.git?branch=master" },
     { name = "schedulefree", specifier = ">=1.4.1" },
     { name = "scib-metrics", specifier = ">=0.5.9" },
     { name = "scikit-misc", specifier = ">=0.5.2" },
@@ -4935,18 +4935,15 @@ wheels = [
 
 [[package]]
 name = "scgen"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
+version = "2.1.1"
+source = { git = "https://github.com/theislab/scgen.git?branch=master#d79e1f04233c30f9a4eb5b8d57718127909807d7" }
 dependencies = [
     { name = "adjusttext" },
     { name = "anndata" },
+    { name = "matplotlib" },
     { name = "scanpy" },
     { name = "scvi-tools" },
     { name = "seaborn" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/50/1dd661a53115498b3a9bc4d08a899ee63cb860fad70e4a775bd526622911/scgen-2.1.0.tar.gz", hash = "sha256:0f3f23ee596b20906c22b6a324ca930b70b78c93e18d9c1846214ee84ab872bf", size = 25041, upload-time = "2022-04-25T17:02:52.982Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/94/3aaa9d873964852535af09b9ee12958e3ffda8ed25aec95635e9b133ca00/scgen-2.1.0-py3-none-any.whl", hash = "sha256:1cf2efc967feca0940e00e539e1e0c4115aead2110b0890d83cd42e006d9cc5e", size = 24388, upload-time = "2022-04-25T17:02:50.704Z" },
 ]
 
 [[package]]

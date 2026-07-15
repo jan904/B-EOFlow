@@ -50,6 +50,7 @@ dependencies = [
 
 [tool.uv.sources]
 freia = { git = "https://github.com/vislearn/FrEIA.git" }
+scgen = { git = "https://github.com/theislab/scgen.git", branch = "master" }
 
 [tool.black]
 line-length = 100
