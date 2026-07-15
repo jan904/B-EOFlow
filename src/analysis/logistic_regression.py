@@ -1,6 +1,17 @@
 import torch.nn as nn
 import torch
 from tqdm import tqdm
+import pandas as pd
+import numpy as np
+from IPython.display import display
+from torch.utils.data import DataLoader
+
+from src.model.data_utils import (
+    create_latent_adata,
+    prepare_train_test_data,
+    prepare_data,
+    AdataDataset,
+)
 
 
 class LogisticRegressionClassifier(nn.Module):
@@ -91,3 +102,189 @@ def train_classifier(
 
     print(f"Best Validation Accuracy: {best_val_accuracy:.4f}")
     return accuracies, train_loss, val_loss, best_accuracy_class
+
+
+def generate_counterfactuals(analyzer, key):
+    dataset, dataloader = prepare_data(
+        analyzer.adata,
+        batchsize=1024,
+        device=analyzer.device,
+        dtype=analyzer.dtype,
+        label_key=analyzer.conditions,
+        shuffle=False,
+    )
+
+    cats = dataset.cats[0].categories.tolist()
+    key_idx = cats.index(key)
+
+    means = analyzer.model.means.detach()
+    key_mean = means[key_idx].to(device=analyzer.device, dtype=analyzer.dtype)
+
+    all_x_cf = []
+    all_z_cf = []
+    all_source_labels = []
+
+    with torch.no_grad():
+        for x_batch, c_batch in dataloader:
+            x_batch = x_batch.to(device=analyzer.device, dtype=analyzer.dtype)
+            c_batch = [cond.to(device=analyzer.device, dtype=analyzer.dtype) for cond in c_batch]
+
+            z_batch, _ = analyzer.model(x_batch, rev=False)
+
+            # source label per cell
+            source_idx = torch.argmax(c_batch[0], dim=1)  # (B,)
+            keep_mask = source_idx != key_idx
+            if not keep_mask.any():
+                continue
+
+            z_batch = z_batch[keep_mask]
+            source_idx = source_idx[keep_mask]
+
+            source_labels = [cats[i] for i in source_idx.cpu().tolist()]
+
+            current_mean = means[source_idx]  # (B, D)
+            mean_shift = key_mean - current_mean
+
+            z_cf = z_batch + mean_shift
+            x_cf, _ = analyzer.model(z_cf, rev=True)
+
+            all_x_cf.append(x_cf.cpu())
+            all_z_cf.append(z_cf.cpu())
+            all_source_labels.extend(source_labels)
+
+    all_x_cf = torch.cat(all_x_cf, dim=0)
+    all_z_cf = torch.cat(all_z_cf, dim=0)
+
+    return all_x_cf, all_z_cf, all_source_labels, key
+
+
+def init_classifier(analyzer, key, binary_key=None, latent=False, hidden_dim=None, labels_key=None):
+
+    if labels_key is None:
+        labels_key = analyzer.labels_key
+
+    if latent:
+        adata_train = create_latent_adata(
+            analyzer.adata,
+            analyzer.model,
+            analyzer.device,
+            analyzer.conditions,
+            analyzer.condition_type,
+        )
+    else:
+        adata_train = analyzer.adata.copy()
+
+    if binary_key is not None:
+        adata_train.obs[f"{labels_key}"] = adata_train.obs[f"{labels_key}"].apply(
+            lambda x: f"{key}" if x == f"{key}" else "rest"
+        )
+
+    train_dataset, train_dataloader, test_dataset, test_dataloader = prepare_train_test_data(
+        adata_train,
+        batchsize=128,
+        device=analyzer.device,
+        dtype=analyzer.dtype,
+        label_key=[f"{labels_key}"],
+        test_size=0.2,
+    )
+
+    input_dim = adata_train.X.shape[1]
+    num_classes = len(adata_train.obs[f"{labels_key}"].unique())
+
+    classifier = LogisticRegressionClassifier(
+        input_dim=input_dim, num_classes=num_classes, hidden_dim=hidden_dim
+    ).to(analyzer.device)
+
+    return classifier, train_dataloader, test_dataloader, train_dataset, adata_train, num_classes
+
+
+def evaluate_training_error(analyzer, adata_train, labels_key, num_classes, class_accuracies):
+
+    if labels_key is None:
+        labels_key = analyzer.labels_key
+
+    keys = adata_train.obs[f"{labels_key}"].value_counts().index.tolist()
+    df = pd.DataFrame(
+        {
+            "Class": [f"{keys[i]}" for i in range(num_classes)],
+            "Accuracy": class_accuracies,
+        }
+    )
+    df.style.background_gradient(cmap="viridis", subset=["Accuracy"]).format({"Accuracy": "{:.2f}"})
+
+    display(df)
+
+
+def evaluate_cfs_classification(
+    analyzer, classifier, key, train_dataset, latent=False, labels_key=None
+):
+
+    if labels_key is None:
+        labels_key = analyzer.labels_key
+
+    x_cfs, z_cfs, all_source_labels, key_mean = generate_counterfactuals(analyzer, key=key)
+    adata_cf = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] != key].copy()
+
+    if latent:
+        adata_cf.X = z_cfs.numpy()
+    else:
+        adata_cf.X = x_cfs.numpy()
+
+    cf_dataset = AdataDataset(
+        adata_cf,
+        label_key=None,
+        device=analyzer.device,
+        dtype=analyzer.dtype,
+    )
+
+    cf_loader = DataLoader(
+        cf_dataset,
+        batch_size=256,
+        shuffle=False,
+    )
+
+    cats = train_dataset.cats[0].categories.tolist()
+    target_idx = cats.index(key)
+
+    classifier.eval()
+
+    predictions = []
+    probabilities = []
+
+    with torch.no_grad():
+        for x, _ in cf_loader:
+            x = x.to(analyzer.device)
+
+            logits = classifier(x)
+            probs = torch.softmax(logits, dim=1)
+
+            predictions.append(torch.argmax(probs, dim=1).cpu())
+            probabilities.append(probs.cpu())
+
+    predictions = torch.cat(predictions)
+    probabilities = torch.cat(probabilities)
+
+    results = []
+
+    source_labels = np.asarray(all_source_labels)
+
+    for source in np.unique(source_labels):
+        mask = source_labels == source
+
+        frac = (predictions[mask] == target_idx).float().mean().item()
+        mean_prob = probabilities[mask, target_idx].mean().item()
+
+        results.append(
+            {
+                "source": source,
+                "fraction_predicted_target": frac,
+                "mean_target_probability": mean_prob,
+                "n_cells": int(mask.sum()),
+            }
+        )
+
+    results = pd.DataFrame(results).sort_values("fraction_predicted_target", ascending=False)
+
+    print(results)
+
+    return x_cfs, z_cfs, all_source_labels, target_idx

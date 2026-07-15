@@ -269,7 +269,7 @@ class Analyzer:
 
         jac_dec, ljd, z, x = get_jacobian(
             self.kwargs_data,
-            self.flow,
+            self.model,
             c=cond,
             condition_type=self.condition_type,
             N_samples=N_samples,
@@ -287,7 +287,7 @@ class Analyzer:
                     z=z.detach(),
                     c=cond,
                     condition_type=self.condition_type,
-                    means=self.flow.means.detach() if self.flow.means is not None else None,
+                    means=self.model.means.detach() if self.model.means is not None else None,
                     print_info=True,
                 )
             self.latent_sort = latent_sort
@@ -304,7 +304,7 @@ class Analyzer:
 
         return Analyzer(
             self.adata[mask],
-            self.flow,
+            self.model,
             self.kwargs_data,
             self.labels_key,
             self.control_label,

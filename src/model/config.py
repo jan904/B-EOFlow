@@ -6,6 +6,7 @@ class BaseModelConfig:
     model_type: str = field(init=False, default="base")
 
     N_dim: int = 2000
+    sigma_noise: float = (1.0,)
     optimizer_type: str = "schedulefree"
     warmup_steps: int = 300
     condition_shapes: list = None
@@ -69,10 +70,8 @@ class INNConfig(BaseModelConfig):
 class VAEConfig(BaseModelConfig):
     model_type: str = field(init=False, default="vae")
 
-    dec_hidden: int = 2048
-    dec_n_hidden_layers: int = 2
+    condition: str = "cytokine"
     beta: float = 1.0
-    sigma_noise: float = 1.0
 
     def __post_init__(self):
         super().__post_init__()
