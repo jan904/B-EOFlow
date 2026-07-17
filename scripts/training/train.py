@@ -10,7 +10,7 @@ from src.model.data_utils import (
     build_metacells,
 )
 from src.model.training import train_model
-from src.model.build_model import get_INN, ModelConfig
+from src.model.build_model import get_model, ModelConfig
 
 
 def parse_args():
@@ -48,6 +48,7 @@ def parse_args():
     parser.add_argument("--latent_per_condition", type=int, default=None)
     parser.add_argument("--train_sigma", action="store_true")
     parser.add_argument("--lr_sigma", type=float, default=5e-4)
+    parser.add_argument("--balance_classes", action="store_true")
 
     return parser.parse_args()
 
@@ -204,7 +205,7 @@ def main():
         )
 
         model_config = checkpoint["model_config"]
-        model, optimizer = get_INN(config=model_config)
+        model, optimizer = get_model(config=model_config)
         model = model.to(device)
 
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -258,10 +259,11 @@ def main():
             partition_divisor=args.partition_divisor,
             trainable_sigma=args.train_sigma,
             lr_sigma=args.lr_sigma,
+            balance_classes=args.balance_classes,
         )
 
         # Model initialization
-        model, optimizer = get_INN(config=model_config)
+        model, optimizer = get_model(config=model_config)
         model = model.to(device)
         print(model_config)
 

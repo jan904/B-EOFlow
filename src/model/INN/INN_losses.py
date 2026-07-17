@@ -195,10 +195,22 @@ def get_loss(
         )  # NLL per dimension
 
         factor = (z.shape[1] - 11) / len(model.means_active) / model_config.partition_divisor
-        weight = torch.ones(N_dim, device=device)
-        weight[: len(model.means_active)] = factor  # upweight or downweight the first n dims
+        dim_weight = torch.ones(N_dim, device=device)
+        dim_weight[: len(model.means_active)] = factor  # upweight or downweight the first n dims
 
-        NLL_z_i = NLL_z_i * weight[None, :]  # broadcast across batch
+        NLL_z_i = NLL_z_i * dim_weight[None, :]  # broadcast across batch
+
+        if model_config.balance_classes:
+            class_idx = c_prior.argmax(dim=1)  # [B]
+            class_count = torch.bincount(
+                class_idx, minlength=len(model.means_active)
+            ).float()  # [C]
+            class_weights = 1.0 / (class_count + 1e-8)  # [C]
+            class_weights = class_weights / class_weights.mean()  # normalize
+            sample_weights = class_weights[class_idx]  # [B]
+
+            NLL_z_i = NLL_z_i * sample_weights[:, None]  # broadcast across dimensions
+
         NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
 
     elif model_config.supervise_latent_meaning == "both":

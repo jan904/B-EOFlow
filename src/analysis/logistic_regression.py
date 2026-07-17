@@ -169,11 +169,13 @@ def generate_counterfactuals_scgen(analyzer, key):
     registered batch_key. analyzer.labels_key must match that batch_key.
 
     analyzer.adata holds the same raw counts scGen was trained/registered on, so
-    `.predict`/`.get_latent_representation` are called unconverted. The returned x_cfs
-    is log1p'd before returning (clamped to 0 first, since scGen's decoder has no
-    positivity constraint and can predict negative values) so it's comparable to the
-    log-space INN/scVI pipeline - see mmd.ctrl_mmd_dists/mmd_dists (log1p_transform=True)
-    for how the "real" data it gets compared against is logged to match.
+    `.predict`/`.get_latent_representation` are called unconverted. SCGENMixturePriorWrapper.predict
+    (src/model/SCGEN/SCGEN_model.py) already library-size normalizes + log1p's its
+    output before returning it, so x_cfs here needs no further transform to be
+    comparable to the log-space INN/scVI pipeline - see mmd.ctrl_mmd_dists/mmd_dists
+    (log1p_transform=True) for how the "real" data it gets compared against is
+    normalized/logged to match (see load_data's log_transform=True in
+    src/model/data_utils.py for the equivalent full-AnnData preprocessing).
     """
     adata = analyzer.adata
     labels_key = analyzer.labels_key
@@ -201,7 +203,7 @@ def generate_counterfactuals_scgen(analyzer, key):
         )
 
         z_source = analyzer.model.get_latent_representation(adata_source)
-        x_cf_log = np.log1p(np.clip(pred_adata.X, a_min=0, a_max=None))
+        x_cf_log = pred_adata.X
 
         all_x_cf.append(torch.tensor(x_cf_log, dtype=torch.float32))
         all_z_cf.append(torch.tensor(z_source + delta, dtype=torch.float32))

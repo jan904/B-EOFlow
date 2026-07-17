@@ -6,6 +6,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from src.analysis.logistic_regression import generate_counterfactuals
+from src.utils.utils import normalize_log1p
 
 
 def gaussian_kernel(x, y, sigma=1.0):
@@ -36,7 +37,7 @@ def ctrl_mmd_dists(analyzer, key, iter=10, log1p_transform=False):
     x = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
     x = x.X.toarray() if hasattr(x.X, "toarray") else x.X
     if log1p_transform:
-        x = np.log1p(x)
+        x = normalize_log1p(x)
 
     sigma = torch.median(
         torch.cdist(torch.tensor(x, dtype=torch.float32), torch.tensor(x, dtype=torch.float32))
@@ -68,7 +69,7 @@ def mmd_dists(analyzer, key, sigma=1.0, cf_fn=generate_counterfactuals, log1p_tr
     adata_real = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
     x_real_arr = adata_real.X.toarray() if hasattr(adata_real.X, "toarray") else adata_real.X
     if log1p_transform:
-        x_real_arr = np.log1p(x_real_arr)
+        x_real_arr = normalize_log1p(x_real_arr)
     x_real = torch.tensor(x_real_arr, dtype=torch.float32)
 
     x_cfs = x_cfs.to("cpu")

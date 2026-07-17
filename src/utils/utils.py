@@ -310,13 +310,40 @@ def check_adata_params(adata, dataset_name, top_genes, log_transform=True, cell_
     )
 
 
+def normalize_log1p(x, target_sum=1e4, totals=None):
+    """Per-cell library-size normalization to target_sum followed by log1p, for raw
+    dense count arrays that aren't full AnnData objects. Mirrors
+    sc.pp.normalize_total(target_sum=target_sum) + sc.pp.log1p() (see load_data in
+    src/model/data_utils.py), so counts pulled straight from a raw-count adata are
+    comparable to data that was already normalized/logged at load time.
+
+    `totals`: optional externally-supplied per-row totals to divide by instead of
+    x's own row sum. Use this when x's own row sum isn't a trustworthy size factor -
+    e.g. a model reconstruction where clipping negative values to 0 has shrunk the
+    row sum, which would otherwise inflate whatever survived the clipping once
+    rescaled up to target_sum (see SCGENMixturePriorWrapper.predict)."""
+    if totals is None:
+        totals = x.sum(axis=1, keepdims=True)
+    totals = np.where(totals == 0, 1, totals)
+    return np.log1p(x)  # np.log1p(x / totals * target_sum)
+
+
 def extract_top_genes(analyzer, key, top_n=10, log1p_transform=False):
     adata = analyzer.adata.copy()
     adata.X = adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X
     if log1p_transform:
-        adata.X = np.log1p(adata.X)
+        adata.X = normalize_log1p(adata.X)
 
-    sc.tl.rank_genes_groups(adata, groupby=analyzer.labels_key, method="wilcoxon")
+    # reference=control_label (not the 'rest' default) so genes are ranked for `key`
+    # vs. control specifically - matching what plot_top_deg_violin/plot_mean_expression_comparison
+    # actually visualize, rather than vs. the pooled average of every other condition.
+    sc.tl.rank_genes_groups(
+        adata,
+        groupby=analyzer.labels_key,
+        groups=[key],
+        reference=analyzer.control_label,
+        method="wilcoxon",
+    )
 
     # top genes specifically for your group of interest (`key`)
     top_genes_df = sc.get.rank_genes_groups_df(adata, group=key)
