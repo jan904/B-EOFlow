@@ -1,8 +1,13 @@
+import os
+import copy
 import torch.nn as nn
 import torch
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
+import anndata as ad
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc
 from IPython.display import display
 from torch.utils.data import DataLoader
 
@@ -169,13 +174,15 @@ def generate_counterfactuals_scgen(analyzer, key):
     registered batch_key. analyzer.labels_key must match that batch_key.
 
     analyzer.adata holds the same raw counts scGen was trained/registered on, so
-    `.predict`/`.get_latent_representation` are called unconverted. SCGENMixturePriorWrapper.predict
-    (src/model/SCGEN/SCGEN_model.py) already library-size normalizes + log1p's its
-    output before returning it, so x_cfs here needs no further transform to be
-    comparable to the log-space INN/scVI pipeline - see mmd.ctrl_mmd_dists/mmd_dists
-    (log1p_transform=True) for how the "real" data it gets compared against is
-    normalized/logged to match (see load_data's log_transform=True in
-    src/model/data_utils.py for the equivalent full-AnnData preprocessing).
+    `.predict`/`.get_latent_representation` are called unconverted. By default
+    SCGENMixturePriorWrapper.predict (src/model/SCGEN/SCGEN_model.py) leaves its output
+    in that same raw-count scale (only clipping negatives to 0), so x_cfs here should be
+    compared against real counts directly - see mmd.ctrl_mmd_dists/mmd_dists and the
+    cf_expressions plots with log1p_transform=False. If the wrapper was constructed with
+    normalize_output=True instead, x_cfs comes back library-size-normalized + log1p'd,
+    comparable to the log-space INN/scVI pipeline - use log1p_transform=True to match
+    (see load_data's log_transform=True in src/model/data_utils.py for the equivalent
+    full-AnnData preprocessing).
     """
     adata = analyzer.adata
     labels_key = analyzer.labels_key
@@ -207,6 +214,200 @@ def generate_counterfactuals_scgen(analyzer, key):
 
         all_x_cf.append(torch.tensor(x_cf_log, dtype=torch.float32))
         all_z_cf.append(torch.tensor(z_source + delta, dtype=torch.float32))
+        all_source_labels.extend([source] * adata_source.n_obs)
+
+    x_cfs = torch.cat(all_x_cf, dim=0)
+    z_cfs = torch.cat(all_z_cf, dim=0)
+
+    return x_cfs, z_cfs, all_source_labels, key
+
+
+def generate_counterfactuals_cpa(analyzer, key):
+    """CPA counterpart to generate_counterfactuals/generate_counterfactuals_scgen:
+    for every other condition ("source"), asks CPAMixturePriorWrapper.predict
+    (src/model/CPA/CPA_model.py) to reconstruct each source cell with its
+    perturbation/dosage obs overwritten to `key`, since CPA's decoder conditions
+    directly on those obs fields rather than exposing a ctrl->stim arithmetic API
+    like scGen's `.predict`.
+
+    analyzer.model must be a CPAMixturePriorWrapper around a trained cpa.CPA,
+    registered via `cpa.CPA.setup_anndata(adata, perturbation_key=<condition
+    column>, ...)`. analyzer.labels_key must match that perturbation_key.
+
+    analyzer.adata holds the same raw counts CPA was trained/registered on;
+    CPAMixturePriorWrapper.predict already library-size normalizes + log1p's its
+    output before returning it, so x_cfs here needs no further transform - see
+    generate_counterfactuals_scgen's docstring for the same reasoning.
+    """
+    adata = analyzer.adata
+    labels_key = analyzer.labels_key
+
+    cats = adata.obs[f"{labels_key}"].astype("category").cat.categories.tolist()
+    if key not in cats:
+        raise ValueError(f"key '{key}' not found in adata.obs['{labels_key}']")
+
+    all_x_cf = []
+    all_z_cf = []
+    all_source_labels = []
+
+    for source in cats:
+        if source == key:
+            continue
+
+        adata_source = adata[adata.obs[f"{labels_key}"] == source].copy()
+        if adata_source.n_obs == 0:
+            continue
+
+        pred_adata, delta = analyzer.model.predict(
+            ctrl_key=source,
+            stim_key=key,
+            adata_to_predict=adata_source,
+        )
+
+        z_source = analyzer.model.get_latent_representation(adata_source)
+        x_cf_log = pred_adata.X
+
+        all_x_cf.append(torch.tensor(x_cf_log, dtype=torch.float32))
+        all_z_cf.append(torch.tensor(z_source + delta, dtype=torch.float32))
+        all_source_labels.extend([source] * adata_source.n_obs)
+
+    x_cfs = torch.cat(all_x_cf, dim=0)
+    z_cfs = torch.cat(all_z_cf, dim=0)
+
+    return x_cfs, z_cfs, all_source_labels, key
+
+
+def generate_counterfactuals_scvi(analyzer, key):
+    """scVI counterpart to generate_counterfactuals_scgen: for every other condition
+    ("source"), encodes source cells to latent space, shifts by the learned mixture-prior
+    per-condition mean difference, then decodes back to raw-count scale directly via
+    module.generative - calling the underlying MixturePriorSCVI model directly instead of
+    going through SCVIMixturePriorWrapper.forward()/the generic mean-shift
+    generate_counterfactuals.
+
+    That generic path decodes every cell against a single fixed canonical library size
+    (target_sum, e.g. 1e4) - fine for the log-space use of the wrapper (normalize_output=
+    True), since the result gets log1p'd back down afterward, but in raw-count scale
+    (normalize_output=False, the default) it inflates predictions far past real per-cell
+    totals whenever those totals are smaller than target_sum, which they usually are.
+    This function instead decodes each source cell using its own real per-cell library
+    size (log of its own raw-count total), mirroring how generate_counterfactuals_scgen
+    normalizes SCGENMixturePriorWrapper's output against the source's real total.
+
+    analyzer.model must be a SCVIMixturePriorWrapper around a trained MixturePriorSCVI.
+    analyzer.adata must hold raw counts, matching what MixturePriorSCVI was registered on
+    via `layer="counts"` (see get_VAE in src/model/VAE/VAE_model.py).
+    """
+    adata = analyzer.adata
+    labels_key = analyzer.labels_key
+    wrapper = analyzer.model
+    module = wrapper.module
+
+    cats = adata.obs[f"{labels_key}"].astype("category").cat.categories.tolist()
+    if key not in cats:
+        raise ValueError(f"key '{key}' not found in adata.obs['{labels_key}']")
+    key_idx = cats.index(key)
+    means = wrapper.means.detach().to(device=analyzer.device, dtype=analyzer.dtype)
+
+    all_x_cf = []
+    all_z_cf = []
+    all_source_labels = []
+
+    for source in cats:
+        if source == key:
+            continue
+
+        adata_source = adata[adata.obs[f"{labels_key}"] == source].copy()
+        if adata_source.n_obs == 0:
+            continue
+
+        source_idx = cats.index(source)
+        n = adata_source.n_obs
+
+        z_source = torch.tensor(
+            wrapper.get_latent_representation(adata_source),
+            device=analyzer.device,
+            dtype=analyzer.dtype,
+        )
+        z_cf = z_source + (means[key_idx] - means[source_idx])
+
+        source_x = adata_source.X
+        source_counts = source_x.toarray() if hasattr(source_x, "toarray") else source_x
+        library = torch.log(
+            torch.tensor(
+                source_counts.sum(axis=1, keepdims=True),
+                device=analyzer.device,
+                dtype=analyzer.dtype,
+            )
+        )
+        batch_index = torch.full(
+            (n, 1), wrapper.default_batch_index, dtype=torch.long, device=analyzer.device
+        )
+
+        with torch.no_grad():
+            generative_out = module.generative(z_cf, library, batch_index)
+        x_cf = generative_out["px"].mu
+
+        all_x_cf.append(x_cf.cpu())
+        all_z_cf.append(z_cf.cpu())
+        all_source_labels.extend([source] * n)
+
+    x_cfs = torch.cat(all_x_cf, dim=0)
+    z_cfs = torch.cat(all_z_cf, dim=0)
+
+    return x_cfs, z_cfs, all_source_labels, key
+
+
+def generate_counterfactuals_mean(analyzer, key):
+    """Mean-shift counterpart to generate_counterfactuals/generate_counterfactuals_scgen:
+    for every other condition ("source"), shifts each source cell by the difference
+    between the `key` and source label means (learned as offsets from the control mean
+    in MeanShifter.train), since MeanShifter has no encoder/decoder to call in batches
+    like the INN model does.
+
+    analyzer.model must be a trained MeanShifter, registered via
+    MeanShifter.setup_anndata(adata, labels_key=<condition column>,
+    control_label=<control condition>). analyzer.labels_key must match that labels_key.
+
+    MeanShifter has no separate latent space, so z_cf mirrors x_cf.
+    """
+    adata = analyzer.adata
+    labels_key = analyzer.labels_key
+    control_label = analyzer.control_label
+    model = analyzer.model
+
+    cats = adata.obs[f"{labels_key}"].astype("category").cat.categories.tolist()
+    if key not in cats:
+        raise ValueError(f"key '{key}' not found in adata.obs['{labels_key}']")
+
+    def label_delta(label):
+        if label == control_label:
+            return 0
+        return model.deltas_[label]
+
+    key_delta = label_delta(key)
+
+    all_x_cf = []
+    all_z_cf = []
+    all_source_labels = []
+
+    for source in cats:
+        if source == key:
+            continue
+
+        adata_source = adata[adata.obs[f"{labels_key}"] == source]
+        if adata_source.n_obs == 0:
+            continue
+
+        shift = np.asarray(key_delta - label_delta(source)).reshape(-1)
+
+        x_source = adata_source.X
+        if hasattr(x_source, "toarray"):
+            x_source = x_source.toarray()
+        x_cf = np.asarray(x_source) + shift
+
+        all_x_cf.append(torch.tensor(x_cf, dtype=torch.float32))
+        all_z_cf.append(torch.tensor(x_cf, dtype=torch.float32))
         all_source_labels.extend([source] * adata_source.n_obs)
 
     x_cfs = torch.cat(all_x_cf, dim=0)
@@ -351,3 +552,84 @@ def evaluate_cfs_classification(
     print(results)
 
     return x_cfs, z_cfs, all_source_labels, target_idx
+
+
+def evaluate_cf_roc(analyzer, key, cf_fn=generate_counterfactuals, num_epochs=10, ax=None):
+    """Trains a classifier to distinguish real `key` cells ("original") from
+    counterfactuals produced by cf_fn ("cfs"), then reports the ROC curve for
+    recognizing real cells from a held-out split - the same origin-classifier
+    setup used ad hoc in each model's notebook (generate cfs -> label origin ->
+    train classifier -> ROC), factored out for reuse across models.
+    """
+    x_cfs, z_cfs, all_source_labels, _ = cf_fn(analyzer, key=key)
+
+    adata_real = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
+    adata_real.obs["origin"] = "original"
+
+    adata_cf = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] != key].copy()
+    adata_cf.X = x_cfs.numpy()
+    adata_cf.obs["origin"] = "cfs"
+    adata_cf.obs["source"] = all_source_labels
+
+    adata_combined = ad.concat([adata_real, adata_cf])
+
+    analyzer_cfs = copy.deepcopy(analyzer)
+    analyzer_cfs.adata = adata_combined
+
+    num_original = adata_real.shape[0]
+    num_cfs = adata_cf.shape[0]
+
+    weights = torch.tensor(
+        [1.0 / num_cfs, 1.0 / num_original], dtype=torch.float32, device=analyzer.device
+    )
+    weights = weights / weights.sum() * len(weights)
+
+    classifier, train_loader, test_loader, train_dataset, adata_train, num_classes = init_classifier(
+        analyzer_cfs, key=key, latent=False, hidden_dim=None, labels_key="origin"
+    )
+    train_classifier(
+        classifier, train_loader, test_loader, weights, analyzer.device, num_epochs=num_epochs
+    )
+
+    cats = train_dataset.cats[0].categories.tolist()
+    target_idx = cats.index("original")
+
+    classifier.eval()
+    all_probs = []
+    all_labels = []
+
+    with torch.no_grad():
+        for x, y in test_loader:
+            x = x.to(analyzer.device)
+            probs = torch.softmax(classifier(x), dim=1)
+            all_probs.append(probs.cpu().numpy())
+            all_labels.append(y[0].argmax(dim=1).cpu().numpy())
+
+    all_probs = np.concatenate(all_probs, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    fpr, tpr, _ = roc_curve(all_labels, all_probs[:, target_idx])
+    roc_auc = auc(fpr, tpr)
+
+    plot_roc_curve(fpr, tpr, roc_auc, key, ax=ax, plot_dir=analyzer.plot_dir)
+
+    return fpr, tpr, roc_auc
+
+
+def plot_roc_curve(fpr, tpr, roc_auc, key, ax=None, plot_dir=None):
+    standalone = ax is None
+    if standalone:
+        _, ax = plt.subplots(figsize=(6, 5))
+
+    ax.plot(fpr, tpr, color="steelblue", lw=2, label=f"ROC curve (AUC = {roc_auc:.3f})")
+    ax.plot([0, 1], [0, 1], color="gray", lw=1, linestyle="--", label="Random")
+    ax.set_xlabel("False positive rate")
+    ax.set_ylabel("True positive rate")
+    ax.set_title(f"ROC curve {key} - counterfactuals vs original")
+    ax.legend(fontsize=9)
+
+    if standalone:
+        plt.tight_layout()
+        if plot_dir is not None:
+            plt.savefig(os.path.join(plot_dir, f"roc_curve_{key}.png"), dpi=300)
+        plt.show()

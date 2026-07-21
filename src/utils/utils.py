@@ -325,7 +325,7 @@ def normalize_log1p(x, target_sum=1e4, totals=None):
     if totals is None:
         totals = x.sum(axis=1, keepdims=True)
     totals = np.where(totals == 0, 1, totals)
-    return np.log1p(x)  # np.log1p(x / totals * target_sum)
+    return np.log1p(x / totals * target_sum)
 
 
 def extract_top_genes(analyzer, key, top_n=10, log1p_transform=False):

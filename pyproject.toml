@@ -36,6 +36,7 @@ dependencies = [
     "pyarrow>=23.0.1",
     "pydeseq2>=0.5.4",
     "pymc>=5.28.2",
+    "rdkit>=2026.3.4",
     "scanpy>=1.11.5",
     "scgen>=2.1.0",
     "schedulefree>=1.4.1",

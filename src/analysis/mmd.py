@@ -92,18 +92,20 @@ def mmd_dists(analyzer, key, sigma=1.0, cf_fn=generate_counterfactuals, log1p_tr
     return mmd_value.item(), mmd_per_group
 
 
-def plot_mmd_dists(analyzer, ctrl_mmd, global_mmd, mmd_per_group, key):
+def plot_mmd_dists(analyzer, ctrl_mmd, global_mmd, mmd_per_group, key, ax=None):
     # sort by MMD value
     items = sorted(mmd_per_group.items(), key=lambda x: x[1], reverse=True)
 
     labels = [k for k, _ in items]
     values = [v for _, v in items]
 
-    plt.figure(figsize=(10, 5))
+    standalone = ax is None
+    if standalone:
+        _, ax = plt.subplots(figsize=(10, 5))
 
-    plt.bar(labels, values)
+    ax.bar(labels, values)
 
-    plt.axhline(
+    ax.axhline(
         global_mmd,
         color="red",
         linestyle="--",
@@ -111,7 +113,7 @@ def plot_mmd_dists(analyzer, ctrl_mmd, global_mmd, mmd_per_group, key):
         label=f"Global MMD ({key})",
     )
 
-    plt.axhline(
+    ax.axhline(
         ctrl_mmd,
         color="blue",
         linestyle="--",
@@ -119,11 +121,13 @@ def plot_mmd_dists(analyzer, ctrl_mmd, global_mmd, mmd_per_group, key):
         label="Control MMD (random split)",
     )
 
-    plt.xticks(rotation=45, ha="right")
-    plt.ylabel("MMD")
-    plt.title(f"MMD: Counterfactual vs Real ({key})")
-    plt.legend()
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_ylabel("MMD")
+    ax.set_title(f"MMD: Counterfactual vs Real ({key})")
+    ax.legend()
 
-    plt.tight_layout()
-    plt.savefig(os.path.join(analyzer.plot_dir, f"mmd_counterfactuals_{key}.png"), dpi=300)
-    plt.show()
+    if standalone:
+        plt.tight_layout()
+        plt.savefig(os.path.join(analyzer.plot_dir, f"mmd_counterfactuals_{key}.png"), dpi=300)
+        plt.show()

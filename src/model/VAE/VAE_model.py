@@ -197,29 +197,38 @@ class SCVIMixturePriorWrapper(nn.Module):
     dropped into `Analyzer` for analysis only, in place of an INN flow. Not trainable through
     this wrapper - use MixturePriorSCVI.train() directly for that.
 
-    Operates in the same log1p(normalize_total) space as `adata.X` (the space the rest of the
-    analysis pipeline - Analyzer, generate_counterfactuals, plotting - already assumes), not
-    raw counts, so it is a drop-in replacement for the flow with no other code changes needed.
+    MixturePriorSCVI is trained directly on raw counts (get_VAE registers it via
+    `setup_anndata(adata, cluster_key="cluster_idx", layer="counts", ...)` - see
+    src/model/VAE/VAE_model.py's get_VAE), not on `adata.X`. By default
+    (normalize_output=False) this wrapper matches that: `forward()` feeds/returns raw
+    counts directly, with no log1p/expm1 translation, so `analyzer.adata` should also
+    hold raw counts (mirroring SCGENMixturePriorWrapper's default) for a true count-space
+    comparison against real data.
 
-    Caveats vs. a real ModelWithMixturePrior:
+    Pass normalize_output=True to instead operate in log1p(normalize_total) space (the
+    space `adata.X` is in when loaded with log_transform=True), for compatibility with the
+    rest of the analysis pipeline as it was before this was made an option:
     - rev=False treats `x` as log1p-normalized data and inverts it to pseudo-counts via
       `expm1` before it hits the scVI encoder. Those pseudo-counts always sum to `target_sum`
       per cell, so they differ slightly from the true raw counts (variable library size) the
       model was actually trained on.
-    - rev=False returns the posterior mean `qz.loc`, not a reparameterized sample.
     - rev=True decodes against a fixed canonical library size (`target_sum`), since a bare
       latent `z` carries no library-size information, then reapplies `log1p` so the output
-      lands back in log-normalized space comparable to `adata.X`.
+      lands back in log-normalized space comparable to a log-transformed `adata.X`.
+
+    Other caveats vs. a real ModelWithMixturePrior, regardless of normalize_output:
+    - rev=False returns the posterior mean `qz.loc`, not a reparameterized sample.
     - log_det is always zero (scVI's encoder/decoder aren't a bijective flow), same convention
       already used by the plain VAEModel drop-in.
     """
 
-    def __init__(self, scvi_model, target_sum=1e4, default_batch_index=0):
+    def __init__(self, scvi_model, target_sum=1e4, default_batch_index=0, normalize_output=False):
         super().__init__()
         self.model = scvi_model
         self.module = scvi_model.module
         self.N_dim = self.module.n_latent
         self.default_batch_index = default_batch_index
+        self.normalize_output = normalize_output
         self.register_buffer(
             "log_target_sum", torch.log(torch.tensor(float(target_sum))).reshape(1, 1)
         )
@@ -250,12 +259,13 @@ class SCVIMixturePriorWrapper(nn.Module):
         )
 
         if not rev:
-            counts = torch.expm1(x)
+            counts = torch.expm1(x) if self.normalize_output else x
             inference_out = self.module.inference(counts, batch_index)
             z = inference_out["qz"].loc
             return z, torch.zeros(n, device=x.device)
         else:
             library = self.log_target_sum.to(x.device).expand(n, 1)
             generative_out = self.module.generative(x, library, batch_index)
-            x_hat = torch.log1p(generative_out["px"].mu)
+            px = generative_out["px"].mu
+            x_hat = torch.log1p(px) if self.normalize_output else px
             return x_hat, torch.zeros(n, device=x.device)
