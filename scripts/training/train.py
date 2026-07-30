@@ -8,6 +8,7 @@ from src.model.data_utils import (
     prepare_train_test_data,
     get_condition_shapes,
     build_metacells,
+    split_holdout_combinations,
 )
 from src.model.training import train_model
 from src.model.build_model import get_model, ModelConfig
@@ -32,6 +33,21 @@ def parse_args():
     parser.add_argument("--checkpoint", action="store_true")
     parser.add_argument("--use_counts", action="store_true")
     parser.add_argument("--use_metacells", action="store_true")
+    parser.add_argument(
+        "--metacell_group_keys",
+        nargs="+",
+        default=None,
+        help="obs columns to group cells by when building metacells (e.g. cytokine cell_type). "
+        "Defaults to --conditions when unset, matching the prior coupled behavior.",
+    )
+    parser.add_argument(
+        "--holdout_combo",
+        nargs="+",
+        default=None,
+        help="obs column=value pairs defining one combination to hold out of training "
+        "for leave-one-combo-out OOD evaluation (e.g. cytokine=IL-2 'cell_type=CD8 T cells'). "
+        "Requires --use_metacells.",
+    )
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.0)
     parser.add_argument("--condition_type", type=str, default=None, choices=["mixture", "normal"])
@@ -53,19 +69,47 @@ def parse_args():
     return parser.parse_args()
 
 
+def _parse_holdout_combo(tokens):
+    combo = {}
+    for token in tokens:
+        key, sep, value = token.partition("=")
+        if not sep:
+            raise ValueError(f"Invalid --holdout_combo token '{token}', expected 'key=value'.")
+        combo[key] = value
+    return combo
+
+
+def _sanitize(value):
+    return value.replace(" ", "-").replace("/", "-")
+
+
 def main():
     args = parse_args()
+
+    if args.holdout_combo is not None and not args.use_metacells:
+        raise ValueError("--holdout_combo requires --use_metacells.")
 
     # Set device and dtype
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float32
 
     # Data loading and preprocessing
+    holdout_combo = None
     if args.use_metacells:
         adata, _, control_label = load_data(
             args.dataset, args.top_genes, log_transform=True, cell_types=None
         )
-        adata = build_metacells(adata, group_keys=args.conditions)
+        metacell_group_keys = args.metacell_group_keys or args.conditions
+        adata = build_metacells(adata, group_keys=metacell_group_keys)
+
+        if args.holdout_combo is not None:
+            holdout_combo = _parse_holdout_combo(args.holdout_combo)
+            adata, _ = split_holdout_combinations(
+                adata, [holdout_combo], group_keys=metacell_group_keys
+            )
+            print(
+                f"Held out combo {holdout_combo}; training on the remaining {adata.n_obs} metacells."
+            )
     else:
         adata, _, control_label = load_data(
             args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
@@ -79,7 +123,7 @@ def main():
         label_key=args.conditions,
         test_size=args.test_size,
     )
-    ctrl_idx = dataset.cats[0].categories.tolist().index(control_label)
+    ctrl_idx = 0  # dataset.cats[0].categories.tolist().index(control_label)
 
     D_dim = dataset.X.shape[1]
     N_dim = D_dim
@@ -113,37 +157,42 @@ def main():
         model_name = default_name + "_model.pt"
         output_dir_name = default_name
 
-    model_path += "_best"
-    output_dir_path += "_best"
+    if args.train_sigma:
+        model_path += "_train_sigma"
+        output_dir_path += "_train_sigma"
+    elif args.use_metacells:
+        model_path += "_metacells"
+        output_dir_path += "_metacells"
 
-    # if args.train_sigma:
-    #     model_path += "_train_sigma"
-    #     output_dir_path += "_train_sigma"
-    # else:
-    #     # If use_counts is True, append "_counts" to model name and output dir name
-    #     if args.use_counts:
-    #         model_path += "_counts"
-    #         output_dir_path += "_counts"
+        if holdout_combo is not None:
+            combo_str = "_".join(f"{k}-{_sanitize(v)}" for k, v in holdout_combo.items())
+            model_path += f"_holdout_{combo_str}"
+            output_dir_path += f"_holdout_{combo_str}"
+    else:
+        # If use_counts is True, append "_counts" to model name and output dir name
+        if args.use_counts:
+            model_path += "_counts"
+            output_dir_path += "_counts"
 
-    #     if args.supervise_latent_meaning is not None:
-    #         model_path += f"_{args.supervise_latent_meaning}"
-    #         output_dir_path += f"_{args.supervise_latent_meaning}"
+        if args.supervise_latent_meaning is not None:
+            model_path += f"_{args.supervise_latent_meaning}"
+            output_dir_path += f"_{args.supervise_latent_meaning}"
 
-    #     if args.conditions is not None and args.supervise_latent_meaning is None:
-    #         model_path += "_cond"
-    #         output_dir_path += "_cond"
+        if args.conditions is not None and args.supervise_latent_meaning is None:
+            model_path += "_cond"
+            output_dir_path += "_cond"
 
-    #         if args.condition_type is not None:
-    #             model_path += f"_{args.condition_type}"
-    #             output_dir_path += f"_{args.condition_type}"
+            if args.condition_type is not None:
+                model_path += f"_{args.condition_type}"
+                output_dir_path += f"_{args.condition_type}"
 
-    #             if args.condition_type == "mixture":
-    #                 if args.train_means == True:
-    #                     model_path += f"_train_means"
-    #                     output_dir_path += f"_train_means"
-    #                 else:
-    #                     model_path += "_empirical"
-    #                     output_dir_path += "_empirical"
+                if args.condition_type == "mixture":
+                    if args.train_means == True:
+                        model_path += f"_train_means"
+                        output_dir_path += f"_train_means"
+                    else:
+                        model_path += "_empirical"
+                        output_dir_path += "_empirical"
 
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
@@ -260,6 +309,7 @@ def main():
             trainable_sigma=args.train_sigma,
             lr_sigma=args.lr_sigma,
             balance_classes=args.balance_classes,
+            holdout_combos=[holdout_combo] if holdout_combo is not None else None,
         )
 
         # Model initialization

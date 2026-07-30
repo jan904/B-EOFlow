@@ -9,7 +9,27 @@ from scipy.stats import linregress
 from scipy.stats import t as t_dist
 
 from src.analysis.logistic_regression import generate_counterfactuals
-from src.utils.utils import extract_top_genes, normalize_log1p
+from src.utils.utils import extract_top_genes
+
+
+def _get_real_x(analyzer, condition, log1p_transform=False):
+    """Dense expression matrix for cells labeled `condition`, library-size
+    normalized + log1p'd (via scanpy) when log1p_transform is set, to bring
+    raw-count data onto the same scale as an already-log-space method."""
+    adata = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == condition].copy()
+    if log1p_transform:
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
+    return adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X
+
+
+def _log1p_transform_cfs(x_cfs):
+    """Same transform as _get_real_x, for a counterfactual tensor with no
+    accompanying AnnData - wraps it in one just for the scanpy call."""
+    adata_cfs = ad.AnnData(X=x_cfs.cpu().numpy())
+    sc.pp.normalize_total(adata_cfs, target_sum=1e4)
+    sc.pp.log1p(adata_cfs)
+    return torch.tensor(adata_cfs.X, dtype=torch.float32)
 
 
 def plot_mean_expression_comparison(
@@ -26,12 +46,10 @@ def plot_mean_expression_comparison(
     )
 
     x_cfs, z_cfs, all_source_labels, _ = cfs_fn(analyzer, key=key)
-
-    x = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
-    x = x.X.toarray() if hasattr(x.X, "toarray") else x.X
     if log1p_transform:
-        x = normalize_log1p(x)
-        x_cfs = normalize_log1p(x_cfs)
+        x_cfs = _log1p_transform_cfs(x_cfs)
+
+    x = _get_real_x(analyzer, key, log1p_transform=log1p_transform)
 
     mean_cfs = x_cfs.mean(dim=0).cpu().numpy()
     mean_real = x.mean(axis=0)
@@ -124,19 +142,11 @@ def plot_effect_size_comparison(
     )
 
     x_cfs, z_cfs, all_source_labels, _ = cfs_fn(analyzer, key=key)
-
-    x_key = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
-    x_key = x_key.X.toarray() if hasattr(x_key.X, "toarray") else x_key.X
     if log1p_transform:
-        x_key = normalize_log1p(x_key)
-        x_cfs = normalize_log1p(x_cfs)
+        x_cfs = _log1p_transform_cfs(x_cfs)
 
-    x_ctrl = analyzer.adata[
-        analyzer.adata.obs[analyzer.labels_key] == analyzer.control_label
-    ].copy()
-    x_ctrl = x_ctrl.X.toarray() if hasattr(x_ctrl.X, "toarray") else x_ctrl.X
-    if log1p_transform:
-        x_ctrl = normalize_log1p(x_ctrl)
+    x_key = _get_real_x(analyzer, key, log1p_transform=log1p_transform)
+    x_ctrl = _get_real_x(analyzer, analyzer.control_label, log1p_transform=log1p_transform)
 
     mean_ctrl = x_ctrl.mean(axis=0)
     mean_cfs = x_cfs.mean(dim=0).cpu().numpy()
@@ -223,28 +233,20 @@ def plot_top_deg_violin(
     gene_name = top_gene_names[gene_idx]
     gene_idx = gene_indices[gene_idx]
 
-    def gene_values(adata_subset):
-        x = adata_subset.X.toarray() if hasattr(adata_subset.X, "toarray") else adata_subset.X
-        if log1p_transform:
-            x = normalize_log1p(x)
-        return x[:, gene_idx]
-
-    control_values = gene_values(
-        analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == analyzer.control_label]
-    )
-    key_values = gene_values(analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key])
+    control_values = _get_real_x(analyzer, analyzer.control_label, log1p_transform)[:, gene_idx]
+    key_values = _get_real_x(analyzer, key, log1p_transform)[:, gene_idx]
 
     x_cfs, z_cfs, all_source_labels, _ = cfs_fn(analyzer, key=key)
     # counterfactual = control cells predicted forward to `key`, matching the classic
     # ctrl -> stim comparison (rather than pooling counterfactuals from every source)
     cf_mask = np.asarray(all_source_labels) == analyzer.control_label
 
-    x_cfs_arr = x_cfs.cpu().numpy()
     if log1p_transform:
         # normalize the full per-cell profile (all genes) before slicing to gene_idx -
-        # normalize_log1p's per-cell total only makes sense computed across all genes,
-        # matching how gene_values() above normalizes before indexing into a single gene
-        x_cfs_arr = normalize_log1p(x_cfs_arr)
+        # library-size normalization only makes sense computed across all genes,
+        # matching how _get_real_x normalizes before indexing into a single gene
+        x_cfs = _log1p_transform_cfs(x_cfs)
+    x_cfs_arr = x_cfs.cpu().numpy()
 
     cf_values = x_cfs_arr[cf_mask, gene_idx]
     cf_values = cf_values.clip(min=0, max=np.quantile(cf_values, 0.99))

@@ -2,6 +2,7 @@ import os
 import copy
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -110,6 +111,17 @@ def train_classifier(
 
 
 def generate_counterfactuals(analyzer, key):
+    """For the INN model. Two conditioning schemes, distinguished by
+    analyzer.condition_type:
+
+    - "mixture": the flow itself is unconditioned; a counterfactual is produced by
+      encoding, then shifting z by the learned mixture-prior mean difference between
+      the source and target (key) condition, before decoding.
+    - "normal": the condition is fed directly into the flow's coupling blocks
+      instead of a latent mixture prior, so a counterfactual is produced by encoding
+      under the source condition and decoding the same z under `key`'s condition -
+      no mean shift involved.
+    """
     dataset, dataloader = prepare_data(
         analyzer.adata,
         batchsize=1024,
@@ -121,9 +133,12 @@ def generate_counterfactuals(analyzer, key):
 
     cats = dataset.cats[0].categories.tolist()
     key_idx = cats.index(key)
+    num_classes = len(cats)
 
-    means = analyzer.model.means.detach()
-    key_mean = means[key_idx].to(device=analyzer.device, dtype=analyzer.dtype)
+    normal_conditioning = analyzer.condition_type == "normal"
+    if not normal_conditioning:
+        means = analyzer.model.means.detach()
+        key_mean = means[key_idx].to(device=analyzer.device, dtype=analyzer.dtype)
 
     all_x_cf = []
     all_z_cf = []
@@ -134,24 +149,35 @@ def generate_counterfactuals(analyzer, key):
             x_batch = x_batch.to(device=analyzer.device, dtype=analyzer.dtype)
             c_batch = [cond.to(device=analyzer.device, dtype=analyzer.dtype) for cond in c_batch]
 
-            z_batch, _ = analyzer.model(x_batch, rev=False)
-
             # source label per cell
             source_idx = torch.argmax(c_batch[0], dim=1)  # (B,)
             keep_mask = source_idx != key_idx
             if not keep_mask.any():
                 continue
 
-            z_batch = z_batch[keep_mask]
+            x_batch = x_batch[keep_mask]
+            c_batch = [cond[keep_mask] for cond in c_batch]
             source_idx = source_idx[keep_mask]
-
             source_labels = [cats[i] for i in source_idx.cpu().tolist()]
 
-            current_mean = means[source_idx]  # (B, D)
-            mean_shift = key_mean - current_mean
+            if normal_conditioning:
+                z_batch, _ = analyzer.model(x_batch, c=c_batch, rev=False)
 
-            z_cf = z_batch + mean_shift
-            x_cf, _ = analyzer.model(z_cf, rev=True)
+                c_target = list(c_batch)
+                c_target[0] = F.one_hot(
+                    torch.full_like(source_idx, key_idx), num_classes=num_classes
+                ).to(device=analyzer.device, dtype=analyzer.dtype)
+
+                z_cf = z_batch
+                x_cf, _ = analyzer.model(z_cf, c=c_target, rev=True)
+            else:
+                z_batch, _ = analyzer.model(x_batch, rev=False)
+
+                current_mean = means[source_idx]  # (B, D)
+                mean_shift = key_mean - current_mean
+
+                z_cf = z_batch + mean_shift
+                x_cf, _ = analyzer.model(z_cf, rev=True)
 
             all_x_cf.append(x_cf.cpu())
             all_z_cf.append(z_cf.cpu())

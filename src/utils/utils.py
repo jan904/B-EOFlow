@@ -332,7 +332,8 @@ def extract_top_genes(analyzer, key, top_n=10, log1p_transform=False):
     adata = analyzer.adata.copy()
     adata.X = adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X
     if log1p_transform:
-        adata.X = normalize_log1p(adata.X)
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
 
     # reference=control_label (not the 'rest' default) so genes are ranked for `key`
     # vs. control specifically - matching what plot_top_deg_violin/plot_mean_expression_comparison

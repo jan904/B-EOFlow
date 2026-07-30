@@ -318,11 +318,19 @@ def get_INN(config):
                     subnet_constructor=subnet_fc,
                 )  # bins=3,
                 # flow.append(Fm.HouseholderPerm, n_reflections=4)
-            # elif coupling_block_type == 'GIN':
+            elif config.coupling_block_type == "REALNVP":
+                flow.append(
+                    Fm.RNVPCouplingBlock,
+                    cond=cond,
+                    cond_shape=cond_shape,
+                    subnet_constructor=subnet_fc,
+                    clamp=config.clamp,
+                )
+            # elif config.coupling_block_type == 'GIN':
             #     flow.append(Fm.GINCouplingBlock, cond=cond, cond_shape=cond_shape, subnet_constructor=subnet_fc)
-            # elif coupling_block_type == 'NICE':
+            # elif config.coupling_block_type == 'NICE':
             #     flow.append(Fm.NICECouplingBlock, cond=cond, cond_shape=cond_shape, subnet_constructor=subnet_fc)
-            # elif coupling_block_type == 'None':
+            # elif config.coupling_block_type == 'None':
             #     pass
             # else:
             #     flow.append(Fm.GLOWCouplingBlock, cond=cond, cond_shape=cond_shape, subnet_constructor=subnet_fc)

@@ -26,6 +26,7 @@ class BaseModelConfig:
     latent_per_condition: int = None
     partition_divisor: int = 8
     balance_classes: bool = False
+    holdout_combos: list = None
 
     def __post_init__(self):
         self._validate_condition_type()

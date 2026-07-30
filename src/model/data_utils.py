@@ -409,3 +409,47 @@ def build_metacells(
     sc.pp.log1p(meta_adata)
 
     return meta_adata
+
+
+def split_holdout_combinations(adata, holdout_combos, group_keys=None):
+    """Split off specific obs-column-value combinations for a leave-one-combo-out
+    (LOCO) OOD evaluation, e.g. holdout_combos=[{"cytokine": "IL-2", "cell_type": "CD8 T cells"}]
+    removes exactly the cells/metacells matching that combo from the training set.
+
+    Raises if a combo's key/value doesn't survive elsewhere in the training data: a
+    category with zero training rows never gets a trained mixture-prior mean (see
+    update_means_epoch in src/model/INN/INN_training.py), which would otherwise fail
+    silently at counterfactual-prediction time instead of at split time.
+    """
+    for combo in holdout_combos:
+        for key in combo:
+            if key not in adata.obs.columns:
+                raise ValueError(f"Holdout key '{key}' not found in adata.obs columns.")
+        if group_keys is not None and not set(combo).issubset(group_keys):
+            raise ValueError(
+                f"Holdout combo keys {list(combo)} must be a subset of group_keys {group_keys}."
+            )
+
+    mask = np.zeros(adata.n_obs, dtype=bool)
+    for combo in holdout_combos:
+        combo_mask = np.ones(adata.n_obs, dtype=bool)
+        for key, value in combo.items():
+            combo_mask &= (adata.obs[key] == value).to_numpy()
+        if not combo_mask.any():
+            raise ValueError(f"Holdout combo {combo} matched zero rows in adata.")
+        mask |= combo_mask
+
+    train_adata = adata[~mask].copy()
+    holdout_adata = adata[mask].copy()
+
+    for combo in holdout_combos:
+        for key, value in combo.items():
+            if value not in train_adata.obs[key].unique():
+                raise ValueError(
+                    f"'{value}' no longer occurs in train_adata.obs['{key}'] after "
+                    f"removing combo {combo} — it won't get a trained mean/condition "
+                    f"signal. Leave at least one other combo containing this value in "
+                    f"the training set."
+                )
+
+    return train_adata, holdout_adata
