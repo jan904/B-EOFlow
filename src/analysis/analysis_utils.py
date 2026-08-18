@@ -58,6 +58,8 @@ class Analyzer:
         H_i=None,
         H=None,
         test_size=0.1,
+        combo_categories=None,
+        condition_categories=None,
     ):
         self.adata = adata
         self.model = model
@@ -80,6 +82,15 @@ class Analyzer:
         self.condition_shapes = condition_shapes
         self.conditions = conditions
         self.condition_type = condition_type
+
+        # The category vocabularies the model's mixture-prior means are indexed by
+        # (data_utils.get_condition_vocab, built from the full pre-holdout adata). Pass
+        # them whenever `adata` may be missing combos - a leave-combo-out holdout, or
+        # groups `build_metacells` dropped - so downstream one-hot encodings keep the
+        # same numbering as `model.means` instead of being re-inferred from whichever
+        # rows are present. Both default to None, which reproduces the old inference.
+        self.combo_categories = combo_categories
+        self.condition_categories = condition_categories
 
         self.jac_dec = None
         self.latent_sort = latent_sort

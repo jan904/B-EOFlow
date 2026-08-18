@@ -241,6 +241,14 @@ def plot_top_deg_violin(
     # ctrl -> stim comparison (rather than pooling counterfactuals from every source)
     cf_mask = np.asarray(all_source_labels) == analyzer.control_label
 
+    if not cf_mask.any():
+        # cfs_fn doesn't tag rows by source condition - e.g. INN_OOD.cfs_fn_from_adata,
+        # which wraps an already-generated OOD set under a single label ("Shift"). Those
+        # predictions are for one combo only, so there is no per-source split to make and
+        # every row is the comparison of interest. Without this the mask selects nothing
+        # and the quantile below raises on an empty array.
+        cf_mask = np.ones(len(all_source_labels), dtype=bool)
+
     if log1p_transform:
         # normalize the full per-cell profile (all genes) before slicing to gene_idx -
         # library-size normalization only makes sense computed across all genes,

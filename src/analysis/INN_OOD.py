@@ -198,6 +198,13 @@ def estimate_leftout_combo_mean(
             "make sure the vocabulary was built from the full pre-holdout adata."
         )
 
+    if getattr(model, "factorized", False):
+        # Nothing to estimate: mu(held-out combo) = a_cell_type + b_cytokine, and both
+        # factors were fitted from other combos, so the model already holds the right
+        # mean for a combo it never saw. Returning it (rather than overwriting a row)
+        # also keeps this a read-only call for factorized models.
+        return model.means[combo_categories.index(target_label)].detach()
+
     control_target = {**holdout_combo, condition_key: control_label}
     control_target_label = _combo_label(control_target, combo_order)
     if control_target_label not in combo_categories:
@@ -223,8 +230,12 @@ def estimate_leftout_combo_mean(
 
     estimated_mean = model.means[control_target_idx] + shift
 
-    if hasattr(model, "means_active") and model.means_active is not None:
-        model.means_active.data[target_idx] = estimated_mean[: model.means_active.shape[1]]
+    # `means_free` and not `means_active`: the latter is a property, so under a
+    # factorized prior it returns a freshly composed tensor and this write would land on
+    # a temporary and vanish (the same trap `update_means_epoch` used to fall into).
+    # Factorized models return above and never reach here.
+    if getattr(model, "means_free", None) is not None:
+        model.means_free.data[target_idx] = estimated_mean[: model.means_free.shape[1]]
     else:
         model.means.data[target_idx] = estimated_mean
 
@@ -319,17 +330,42 @@ def sample_leftout_combo_shift(
             "The provided holdout combo is already at the control label; no shift is needed."
         )
 
-    shift = _average_treatment_shift(
-        model,
-        combo_categories,
-        combo_order,
-        holdout_combo,
-        condition_key,
-        control_label,
-        cell_type_key,
-        target_treatment,
-        observed_combos=observed_combos,
-    ).detach()
+    if getattr(model, "factorized", False):
+        # The shift is just the difference between two prior means the model already
+        # holds - no 17-way average of per-cell-type differences to estimate, because
+        # the treatment factor is shared across cell types by construction.
+        #
+        # Written as a difference of means rather than by reading the treatment
+        # embedding directly: it needs no gauge to be pinned, and it stays correct
+        # unchanged if the prior later gains a cell-type-specific interaction term
+        # (where a single treatment vector would no longer be well defined).
+        target_label = _combo_label(holdout_combo, combo_order)
+        control_label_combo = _combo_label(
+            {**holdout_combo, condition_key: control_label}, combo_order
+        )
+        for lbl in (target_label, control_label_combo):
+            if lbl not in combo_categories:
+                raise ValueError(
+                    f"Combo '{lbl}' is not in combo_categories; make sure the vocabulary "
+                    "was built from the full pre-holdout adata."
+                )
+        means = model.means.detach()
+        shift = (
+            means[combo_categories.index(target_label)]
+            - means[combo_categories.index(control_label_combo)]
+        )
+    else:
+        shift = _average_treatment_shift(
+            model,
+            combo_categories,
+            combo_order,
+            holdout_combo,
+            condition_key,
+            control_label,
+            cell_type_key,
+            target_treatment,
+            observed_combos=observed_combos,
+        ).detach()
 
     control_mask = (adata.obs[cell_type_key] == holdout_combo[cell_type_key]) & (
         adata.obs[condition_key] == control_label

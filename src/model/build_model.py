@@ -10,16 +10,25 @@ from dataclasses import dataclass
 
 
 def get_param_groups(model, config):
+    # The prior's parameters are whatever the model says they are - one free means
+    # tensor, or the per-condition factor embeddings when factorized - so this doesn't
+    # have to know which parameterization is in use. Note `means_active` is a derived
+    # property under factorization and never appears in named_parameters().
+    prior_names = model.prior_parameter_names()
+    prior_params = model.prior_parameters()
+
     other_params = [
-        p for name, p in model.named_parameters() if name not in {"means_active", "log_sigma"}
+        p
+        for name, p in model.named_parameters()
+        if name not in prior_names and name != "log_sigma"
     ]
 
     param_groups = [{"params": other_params, "lr": config.lr}]
 
-    if model.means_active is not None:
+    if prior_params:
         param_groups.append(
             {
-                "params": [model.means_active],
+                "params": prior_params,
                 "lr": config.lr_means,
             }
         )
@@ -96,9 +105,11 @@ def remap_keys(model, state_dict):
 
     for k, v in state_dict.items():
 
-        # Old checkpoint: means -> means_active
-        if k == "means":
-            k = "means_active"
+        # Old checkpoint: means -> means_active -> means_free
+        # (`means_active` became a property that dispatches between the free tensor and
+        # the factorized composition, so the free parameter itself is now `means_free`.)
+        if k in ("means", "means_active"):
+            k = "means_free"
 
         # Handle flow <-> model prefix mismatch
         if k.startswith("flow."):
@@ -121,7 +132,28 @@ def remap_keys(model, state_dict):
 
     missing, unexpected = model.load_state_dict(remapped_state, strict=False)
 
-    non_prior_missing = [k for k in missing if not k.startswith("means")]
+    # The prior block is the one thing that must never be silently left at init. A
+    # factorized model loading a free-means checkpoint (or the reverse) leaves the prior
+    # randomly initialized while every flow weight loads fine, so training resumes on a
+    # prior that encodes nothing - the exact failure this branch exists to remove. Since
+    # load_state_dict runs with strict=False so genuinely fresh combos stay tolerated,
+    # this has to be checked explicitly.
+    prior_missing = [k for k in missing if k.startswith(("means", "factor_emb"))]
+    if prior_missing and any(k.startswith("factor_emb") for k in prior_missing):
+        raise RuntimeError(
+            f"Checkpoint has no factorized prior ({prior_missing} missing) but the model "
+            "expects one. This is a free-means checkpoint being loaded into a factorized "
+            "model - they are not interchangeable. Train from scratch, or rebuild the "
+            "model with factorize_means=False."
+        )
+    if "means_free" in prior_missing:
+        raise RuntimeError(
+            "Checkpoint has no free per-combo means but the model expects them - this "
+            "looks like a factorized checkpoint being loaded into a free-means model. "
+            "Rebuild the model with factorize_means=True."
+        )
+
+    non_prior_missing = [k for k in missing if not k.startswith(("means", "factor_emb"))]
 
     if non_prior_missing:
         print(f"WARNING: missing keys after remapping: {non_prior_missing}")

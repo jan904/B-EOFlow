@@ -393,7 +393,15 @@ def update_means_epoch(model, dataloader, device, momentum=0.9):
     the structurally-zero `means_zero` buffer (shared N(0,1) prior across conditions by
     design), so the empirical mean is taken over the active dims only.
     """
-    means = model.means_active  # (K, means_dim), the parameter itself
+    if getattr(model, "factorized", False):
+        raise RuntimeError(
+            "update_means_epoch does not apply to a factorized prior: its means are "
+            "composed from per-condition factors, so there is no per-combo parameter to "
+            "set from an empirical mean (and writing one would break the factorization "
+            "that makes held-out combos predictable). Use trainable_means=True."
+        )
+
+    means = model.means_free  # (K, means_dim), the parameter itself
     means_dim = means.shape[1]
 
     cluster_sums = torch.zeros_like(means)  # (K, means_dim)

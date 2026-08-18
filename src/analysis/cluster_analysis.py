@@ -8,14 +8,42 @@ from sklearn.decomposition import PCA
 from scipy.spatial.distance import pdist, squareform
 from matplotlib.colors import LogNorm
 
-from src.model.data_utils import create_latent_adata
+from src.model.data_utils import create_latent_adata, prepare_data
 
 
 def plot_latent_means_umap(analyzer, umap_2d=None):
     means = analyzer.model.means.detach().cpu().numpy()  # (K, D)
 
-    dataset = analyzer.kwargs_data["dataset"]
-    labels = dataset.cats[0].categories.tolist()  # product state labels for means
+    # `labels` is zipped positionally against the rows of `means` (for both the colour
+    # map and the per-point annotation), so it has to be the vocabulary the means are
+    # indexed by - not one inferred from whichever rows `analyzer.adata` holds. Those
+    # differ as soon as a combo has no cells (a holdout, or a group build_metacells
+    # dropped), and the plot would then label every mean past the gap with its
+    # neighbour's name without any error.
+    dataset = analyzer.kwargs_data.get("dataset")
+    if dataset is None:
+        dataset, _ = prepare_data(
+            analyzer.adata,
+            batchsize=1024,
+            device=analyzer.device,
+            dtype=analyzer.dtype,
+            label_key=analyzer.conditions,
+            shuffle=False,
+            combo_categories=getattr(analyzer, "combo_categories", None),
+            condition_categories=getattr(analyzer, "condition_categories", None),
+        )
+
+    labels = getattr(analyzer, "combo_categories", None)
+    if labels is None:
+        labels = dataset.cats[0].categories.tolist()  # product state labels for means
+    labels = list(labels)
+
+    if len(labels) != means.shape[0]:
+        raise ValueError(
+            f"{len(labels)} combo labels but {means.shape[0]} prior means. Pass the "
+            "vocabulary used at training time as Analyzer(combo_categories=..., "
+            "condition_categories=...) so labels line up with the means."
+        )
 
     latent_adata = create_latent_adata(analyzer.adata, analyzer.model, analyzer.device)
     Z = latent_adata.X

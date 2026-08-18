@@ -29,6 +29,9 @@ class BaseModelConfig:
     holdout_combos: list = None
     combo_categories: list = None
     condition_categories: dict = None
+    # obs column names, in the order combo labels are joined. Defaults to
+    # list(condition_categories) when left None.
+    conditions: list = None
 
     def __post_init__(self):
         self._validate_condition_type()
@@ -57,6 +60,22 @@ class INNConfig(BaseModelConfig):
     # Overrides BaseModelConfig's fixed 2.0 (kept there for the VAE path, whose
     # initialization still uses its own scale convention).
     means_seperation: float = None
+
+    # Factorize the mixture-prior means as mu(combo) = sum of per-condition level
+    # embeddings, instead of one free vector per combo. Requires combo_categories and
+    # condition_categories, and trainable_means=True. See
+    # INNs_model.ModelWithMixturePrior for why this is what makes held-out combos
+    # predictable rather than guessed.
+    factorize_means: bool = False
+    # Size of the condition-carrying latent block. None keeps the existing
+    # `latent_per_condition * n_clusters` sizing for free means, or 2*sum(level counts)
+    # when factorized (which does not grow with the number of combos).
+    means_dim: int = None
+    # Which condition is the treatment axis, and its control level - pins the gauge so
+    # the treatment embedding reads as an effect relative to control (see
+    # ModelWithMixturePrior._effective_factor). Only used when factorize_means.
+    control_condition: str = None
+    control_label: str = None
 
     N_blocks: int = 12
     subnet_fc: callable = None

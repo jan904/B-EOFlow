@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import math
+import warnings
 
 import FrEIA.framework as Ff
 import FrEIA.modules as Fm
@@ -35,6 +36,40 @@ def default_means_seperation(n_components):
     return 2.0 * math.sqrt(2.0 * math.log(max(int(n_components), 2)))
 
 
+def build_combo_index(combo_categories, condition_categories, conditions):
+    """(K, n_factors) long tensor: row k holds the per-factor level indices of combo k.
+
+    `combo_categories` are '__'-joined labels in `conditions` order (see
+    `data_utils.get_condition_vocab`, which builds them as the Cartesian product, and
+    `AdataDataset`, which joins obs columns the same way), so combo "IL-2__CD8 Memory"
+    with conditions ["cytokine", "cell_type"] maps to (index of IL-2, index of CD8 Memory).
+
+    This is what lets a factorized prior compose `mu(combo) = a_cytokine + b_cell_type`
+    while everything downstream keeps indexing means by a single combo id.
+    """
+    n_factors = len(conditions)
+    level_idx = [{v: i for i, v in enumerate(condition_categories[c])} for c in conditions]
+
+    rows = []
+    for combo in combo_categories:
+        parts = combo.split("__")
+        if len(parts) != n_factors:
+            raise ValueError(
+                f"Combo label '{combo}' splits into {len(parts)} parts but {n_factors} "
+                f"conditions were given ({list(conditions)}). A condition value containing "
+                "'__' would do this."
+            )
+        try:
+            rows.append([level_idx[i][p] for i, p in enumerate(parts)])
+        except KeyError as e:
+            raise ValueError(
+                f"Combo label '{combo}' references level {e} that is not in "
+                f"condition_categories - build both from the same pre-holdout adata."
+            ) from e
+
+    return torch.tensor(rows, dtype=torch.long)
+
+
 class ModelWithMixturePrior(nn.Module):
     def __init__(
         self,
@@ -47,22 +82,67 @@ class ModelWithMixturePrior(nn.Module):
         init_sigma=1.0,
         means_seperation=None,
         latent_per_condition=None,
+        means_dim=None,
+        combo_index=None,
+        condition_shapes=None,
+        control_factor=None,
+        control_level=None,
     ):
+        """`combo_index` (with `condition_shapes`) switches the mixture prior from one
+        free mean per combo to a **factorized** one:
+
+            mu(cell_type, cytokine) = a_cell_type + b_cytokine
+
+        Free per-combo means give every combo its own independent vector, so a combo
+        held out of training keeps whatever its row was initialized to and its mean has
+        to be guessed at eval time (`INN_OOD.estimate_leftout_combo_mean`) under an
+        additivity assumption the training objective never enforced - measured cosine
+        between a cell type's treatment shift and the average of the others' was ~0.
+        Factorized, the held-out combo has no free parameter at all: both `a` and `b`
+        are fitted from every *other* combo sharing that cell type / that cytokine, so
+        its mean is defined by construction, and the likelihood now actively requires a
+        cytokine's effect to be the same translation in every cell type - exactly the
+        assumption counterfactual latent arithmetic relies on.
+
+        `control_factor`/`control_level` pin the gauge: `a + b` is redundant (add a
+        constant to every `a`, subtract it from every `b`), so the named level is fixed
+        at zero. With the control condition pinned, `a_cell_type` *is* that cell type's
+        control mean and `b_cytokine` *is* the latent treatment effect, which makes the
+        counterfactual literally "encode control cells, add `b`, decode" - no shift
+        estimation anywhere.
+
+        `means_dim` sets the condition-carrying block directly. Free means size it as
+        `latent_per_condition * n_components`, which needlessly grows with the number of
+        combos; factorized only needs room for `sum(condition_shapes)` mutually
+        orthogonal level vectors.
+        """
         super().__init__()
         self.model = model
         self.means_dim = N_dim
         self.N_dim = N_dim
+        self.factorized = False
 
         if condition_type == "mixture":
             if n_components is None:
                 raise ValueError("n_components must be specified for mixture condition type.")
-            if latent_per_condition is not None:
-                if latent_per_condition * n_components > N_dim:
-                    raise ValueError(
-                        f"latent_per_condition * n_components ({latent_per_condition * n_components}) "
-                        f"cannot exceed N_dim ({N_dim})."
-                    )
+
+            self.factorized = combo_index is not None
+            if self.factorized and condition_shapes is None:
+                raise ValueError("condition_shapes must be given alongside combo_index.")
+
+            if means_dim is not None:
+                self.means_dim = means_dim
+            elif latent_per_condition is not None:
                 self.means_dim = latent_per_condition * n_components
+            elif self.factorized:
+                # enough room for every level to get its own orthogonal direction, with
+                # slack; `sum(condition_shapes)` is the hard floor asserted below.
+                self.means_dim = 2 * int(sum(condition_shapes))
+
+            if self.means_dim > N_dim:
+                raise ValueError(
+                    f"means_dim ({self.means_dim}) cannot exceed N_dim ({N_dim})."
+                )
 
             # learnable part: (n_components, means_dim)
             #
@@ -83,11 +163,72 @@ class ModelWithMixturePrior(nn.Module):
             if means_seperation is None:
                 means_seperation = default_means_seperation(n_components)
             self.means_seperation = float(means_seperation)  # resolved, for logging
+            scale = self.means_seperation / math.sqrt(2.0)
 
-            means_active = torch.zeros(n_components, self.means_dim)
-            torch.nn.init.orthogonal_(means_active)
-            means_active = means_active * (self.means_seperation / math.sqrt(2.0))
-            self.means_active = torch.nn.Parameter(means_active, requires_grad=trainable_means)
+            self.control_factor = control_factor
+            self.control_level = control_level
+
+            if self.factorized:
+                if not trainable_means:
+                    raise ValueError(
+                        "A factorized prior has no closed-form empirical update - its factors "
+                        "are only fitted by gradient descent, so trainable_means must be True."
+                    )
+
+                condition_shapes = [int(n) for n in condition_shapes]
+                total_levels = int(sum(condition_shapes))
+                if self.means_dim < total_levels:
+                    raise ValueError(
+                        f"means_dim ({self.means_dim}) must be at least sum(condition_shapes) "
+                        f"({total_levels}) so every level gets its own orthogonal direction."
+                    )
+                if combo_index.shape != (n_components, len(condition_shapes)):
+                    raise ValueError(
+                        f"combo_index has shape {tuple(combo_index.shape)}, expected "
+                        f"({n_components}, {len(condition_shapes)})."
+                    )
+
+                # One joint orthogonal basis sliced per factor, rather than initializing
+                # each factor separately: that makes the factors' subspaces mutually
+                # orthogonal, so two combos differing in exactly one factor sit
+                # `scale * sqrt(2)` = means_seperation apart and the separation rule
+                # carries over unchanged from the free-means case. (The gauge shift below
+                # is a pure translation of one block, which leaves all pairwise distances
+                # untouched.)
+                basis = torch.zeros(total_levels, self.means_dim)
+                torch.nn.init.orthogonal_(basis)
+                basis = basis * scale
+
+                self.factor_emb = nn.ParameterList()
+                offset = 0
+                for n_levels in condition_shapes:
+                    self.factor_emb.append(
+                        nn.Parameter(basis[offset : offset + n_levels].clone(), requires_grad=True)
+                    )
+                    offset += n_levels
+
+                self.register_buffer("combo_index", combo_index.long())
+                self.means_free = None
+            else:
+                if n_components > self.means_dim:
+                    # `orthogonal_` on a tall matrix orthonormalizes columns, not rows, so
+                    # K vectors in fewer than K dims cannot be mutually orthogonal and the
+                    # achieved separation falls short of `means_seperation`. A factorized
+                    # prior only needs room for sum(level counts) - 29 here, not 198 -
+                    # which is why it does not run into this.
+                    warnings.warn(
+                        f"n_components ({n_components}) exceeds means_dim ({self.means_dim}): "
+                        f"the means cannot be mutually orthogonal, so the initialization will "
+                        f"not achieve the requested separation of {self.means_seperation:.3f}. "
+                        f"Raise means_dim/latent_per_condition, or factorize the prior.",
+                        stacklevel=2,
+                    )
+                means_free = torch.zeros(n_components, self.means_dim)
+                torch.nn.init.orthogonal_(means_free)
+                means_free = means_free * scale
+                self.means_free = torch.nn.Parameter(means_free, requires_grad=trainable_means)
+                self.factor_emb = None
+                self.combo_index = None
 
             self.log_sigma = None
             if trainable_sigma:
@@ -108,10 +249,46 @@ class ModelWithMixturePrior(nn.Module):
             else:
                 self.means_zero = None
         else:
-            self.means_active = None
+            self.means_free = None
+            self.factor_emb = None
+            self.combo_index = None
             self.means_zero = None
             self.log_sigma = None
             self.means_seperation = None
+            self.control_factor = None
+            self.control_level = None
+
+    def _effective_factor(self, i):
+        """Factor `i`'s level embeddings with the gauge applied.
+
+        `mu = a + b` is redundant - shifting every `a` by a constant and every `b` by its
+        negative leaves every `mu` unchanged - so the pinned level is subtracted off,
+        fixing it at zero. Being a translation of one whole block, this leaves all
+        pairwise distances between composed means untouched; it only chooses *which*
+        decomposition of the same geometry the parameters express, so that
+        `factor_emb[control_factor]` reads directly as a treatment effect relative to
+        control instead of an arbitrary offset.
+        """
+        emb = self.factor_emb[i]
+        if self.control_factor == i and self.control_level is not None:
+            emb = emb - emb[self.control_level]
+        return emb
+
+    @property
+    def means_active(self):
+        """(K, means_dim) condition-carrying block of the prior means.
+
+        Composed from the per-factor embeddings when factorized, otherwise the free
+        per-combo parameter. Kept as a single property so every consumer - the losses,
+        the `means` property, the OOD samplers - indexes means by combo id regardless of
+        how they are parameterized.
+        """
+        if self.factorized:
+            return sum(
+                self._effective_factor(i)[self.combo_index[:, i]]
+                for i in range(len(self.factor_emb))
+            )
+        return self.means_free
 
     @property
     def means(self):
@@ -120,6 +297,43 @@ class ModelWithMixturePrior(nn.Module):
         if self.means_zero is None:
             return self.means_active
         return torch.cat([self.means_active, self.means_zero], dim=1)
+
+    def prior_parameters(self):
+        """Mixture-prior parameters (factors or free means), for their own lr group."""
+        if self.factorized:
+            return list(self.factor_emb.parameters())
+        return [] if self.means_free is None else [self.means_free]
+
+    def prior_parameter_names(self):
+        """State-dict names of `prior_parameters`, to exclude them from the base group."""
+        if self.factorized:
+            return {f"factor_emb.{i}" for i in range(len(self.factor_emb))}
+        return {"means_free"}
+
+    def treatment_shift(self, level, factor=None):
+        """Latent translation from the pinned control level to `level`, as a full N_dim
+        vector (zero-padded outside the condition block) ready to add to a latent code.
+
+        This is what replaces `INN_OOD._average_treatment_shift` for a factorized prior.
+        That function had to *estimate* the shift by averaging per-cell-type mean
+        differences, which is only valid if those differences agree across cell types -
+        they did not. Here the shift is a single parameter fitted jointly from every cell
+        type that saw this treatment, so there is nothing to average and nothing to
+        estimate, including for a combo held out of training.
+        """
+        if not self.factorized:
+            raise RuntimeError(
+                "treatment_shift requires a factorized prior; with free per-combo means "
+                "there is no single treatment vector to read off."
+            )
+        factor = self.control_factor if factor is None else factor
+        if factor is None:
+            raise ValueError("No control_factor is set - pass `factor` explicitly.")
+
+        b = self._effective_factor(factor)[level]
+        out = torch.zeros(self.N_dim, device=b.device, dtype=b.dtype)
+        out[: self.means_dim] = b
+        return out
 
     def forward(self, x, c=None, rev=False):
         return self.model(x, c=c, rev=rev)
@@ -395,6 +609,51 @@ def get_INN(config):
         else:
             n_components = config.n_clusters
 
+    combo_index = None
+    factor_shapes = None
+    control_factor = None
+    control_level = None
+
+    if config.condition_type == "mixture" and getattr(config, "factorize_means", False):
+        if config.combo_categories is None or config.condition_categories is None:
+            raise ValueError(
+                "factorize_means needs combo_categories and condition_categories on the "
+                "config - build both from the full pre-holdout adata via "
+                "data_utils.get_condition_vocab, so every combo (including held-out ones) "
+                "has a slot and every level has an index."
+            )
+
+        conditions = config.conditions or list(config.condition_categories)
+        combo_index = build_combo_index(
+            config.combo_categories, config.condition_categories, conditions
+        )
+
+        # Derived from condition_categories rather than taken from config.condition_shapes:
+        # these must line up with combo_index exactly, and condition_shapes is computed
+        # separately (from adata.obs nunique), so it can silently disagree after a holdout.
+        factor_shapes = [len(config.condition_categories[c]) for c in conditions]
+
+        if n_components != len(config.combo_categories):
+            raise ValueError(
+                f"n_clusters ({n_components}) must equal len(combo_categories) "
+                f"({len(config.combo_categories)}) for a factorized prior."
+            )
+
+        if config.control_condition is not None:
+            if config.control_condition not in conditions:
+                raise ValueError(
+                    f"control_condition '{config.control_condition}' not in {conditions}."
+                )
+            control_factor = conditions.index(config.control_condition)
+            if config.control_label is not None:
+                levels = list(config.condition_categories[config.control_condition])
+                if config.control_label not in levels:
+                    raise ValueError(
+                        f"control_label '{config.control_label}' not among the levels of "
+                        f"'{config.control_condition}' ({levels})."
+                    )
+                control_level = levels.index(config.control_label)
+
     model = ModelWithMixturePrior(
         flow,
         N_dim=config.N_dim,
@@ -405,6 +664,11 @@ def get_INN(config):
         latent_per_condition=config.latent_per_condition,
         trainable_sigma=config.trainable_sigma,
         init_sigma=config.init_sigma,
+        means_dim=getattr(config, "means_dim", None),
+        combo_index=combo_index,
+        condition_shapes=factor_shapes,
+        control_factor=control_factor,
+        control_level=control_level,
     )
 
     return model

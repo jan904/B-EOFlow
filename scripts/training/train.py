@@ -63,6 +63,12 @@ def parse_args():
     parser.add_argument("--partition_divisor", type=int, default=8)
     # None -> 2*sqrt(2 ln K), see INNs_model.default_means_seperation
     parser.add_argument("--means_seperation", type=float, default=None)
+    # Factorized mixture prior: mu(combo) = sum of per-condition level embeddings
+    parser.add_argument("--factorize_means", action="store_true")
+    parser.add_argument("--means_dim", type=int, default=None)
+    # which condition is the treatment axis (its control level is the dataset's own
+    # control_label); required for --factorize_means to expose a treatment shift
+    parser.add_argument("--control_condition", type=str, default=None)
     parser.add_argument("--latent_per_condition", type=int, default=None)
     parser.add_argument("--train_sigma", action="store_true")
     parser.add_argument("--lr_sigma", type=float, default=5e-4)
@@ -209,6 +215,14 @@ def main():
                         model_path += "_empirical"
                         output_dir_path += "_empirical"
 
+    # The prior parameterization has to be part of the path: factorized and free-means
+    # checkpoints are structurally incompatible but every other path component is
+    # identical, so without this a factorized run resolves to an existing free-means
+    # checkpoint and the resume-if-exists branch below would try to load it.
+    if args.factorize_means:
+        model_path += "_factorized"
+        output_dir_path += "_factorized"
+
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
     os.makedirs(model_path, exist_ok=True)
@@ -327,6 +341,13 @@ def main():
             holdout_combos=[holdout_combo] if holdout_combo is not None else None,
             combo_categories=combo_categories,
             condition_categories=condition_categories,
+            conditions=args.conditions,
+            factorize_means=args.factorize_means,
+            means_dim=args.means_dim,
+            control_condition=args.control_condition,
+            # control_label comes from load_data/load_metacells, so the pinned level is
+            # always the dataset's own control rather than a separately-typed string
+            control_label=control_label if args.factorize_means else None,
         )
 
         # Model initialization

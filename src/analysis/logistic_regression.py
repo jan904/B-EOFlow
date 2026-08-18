@@ -129,16 +129,48 @@ def generate_counterfactuals(analyzer, key):
         dtype=analyzer.dtype,
         label_key=analyzer.conditions,
         shuffle=False,
+        # Index against the model's own combo vocabulary when the analyzer carries it.
+        # Inferring categories from whichever rows `analyzer.adata` happens to hold
+        # silently renumbers them whenever a combo is absent (a holdout, or a group
+        # `build_metacells` dropped for being too small), and every index after the gap
+        # then points at the wrong row of `model.means`.
+        combo_categories=getattr(analyzer, "combo_categories", None),
+        condition_categories=getattr(analyzer, "condition_categories", None),
     )
 
     cats = dataset.cats[0].categories.tolist()
-    key_idx = cats.index(key)
     num_classes = len(cats)
+
+    # `cats` holds combo labels ("IL-4__NK") whenever `analyzer.conditions` names more
+    # than one condition, so `key` (a single condition's value, e.g. "IL-4") is not a
+    # member of it. The counterfactual is then per cell: hold every other condition at
+    # that cell's own value and move only `labels_key` to `key` - i.e. change the
+    # cytokine, keep the cell type - which is also what the OOD samplers in
+    # analysis/INN_OOD.py do. With one condition, combo labels *are* that condition's
+    # values and this reduces to the original constant target.
+    combo_order = list(analyzer.conditions)
+    label_pos = combo_order.index(analyzer.labels_key)
+    cat_to_idx = {c: i for i, c in enumerate(cats)}
+
+    target_idx_of = []
+    for c in cats:
+        parts = c.split("__")
+        parts[label_pos] = key
+        target_idx_of.append(cat_to_idx.get("__".join(parts), -1))
+    target_idx_of = torch.tensor(target_idx_of, device=analyzer.device)
+    if (target_idx_of >= 0).sum() == 0:
+        raise ValueError(
+            f"No combo in the vocabulary matches '{analyzer.labels_key}'='{key}'. "
+            f"Available values: {sorted({c.split('__')[label_pos] for c in cats})}"
+        )
+
+    # source label = the `labels_key` component only, so callers that group by it
+    # (mmd.mmd_dists' per-group breakdown) still match against adata.obs[labels_key]
+    source_label_of = [c.split("__")[label_pos] for c in cats]
 
     normal_conditioning = analyzer.condition_type == "normal"
     if not normal_conditioning:
-        means = analyzer.model.means.detach()
-        key_mean = means[key_idx].to(device=analyzer.device, dtype=analyzer.dtype)
+        means = analyzer.model.means.detach().to(device=analyzer.device, dtype=analyzer.dtype)
 
     all_x_cf = []
     all_z_cf = []
@@ -151,30 +183,40 @@ def generate_counterfactuals(analyzer, key):
 
             # source label per cell
             source_idx = torch.argmax(c_batch[0], dim=1)  # (B,)
-            keep_mask = source_idx != key_idx
+            target_idx = target_idx_of[source_idx]  # (B,)
+
+            # drop cells already at `key`, and any whose target combo has no slot
+            keep_mask = (target_idx != source_idx) & (target_idx >= 0)
             if not keep_mask.any():
                 continue
 
             x_batch = x_batch[keep_mask]
             c_batch = [cond[keep_mask] for cond in c_batch]
             source_idx = source_idx[keep_mask]
-            source_labels = [cats[i] for i in source_idx.cpu().tolist()]
+            target_idx = target_idx[keep_mask]
+            source_labels = [source_label_of[i] for i in source_idx.cpu().tolist()]
 
             if normal_conditioning:
                 z_batch, _ = analyzer.model(x_batch, c=c_batch, rev=False)
 
                 c_target = list(c_batch)
-                c_target[0] = F.one_hot(
-                    torch.full_like(source_idx, key_idx), num_classes=num_classes
-                ).to(device=analyzer.device, dtype=analyzer.dtype)
+                c_target[0] = F.one_hot(target_idx, num_classes=num_classes).to(
+                    device=analyzer.device, dtype=analyzer.dtype
+                )
+                # keep the per-condition one-hots consistent with the combo one-hot
+                if len(c_target) > 1 + label_pos:
+                    key_level = dataset.cats[1 + label_pos].categories.get_loc(key)
+                    c_target[1 + label_pos] = F.one_hot(
+                        torch.full_like(target_idx, key_level),
+                        num_classes=c_target[1 + label_pos].shape[1],
+                    ).to(device=analyzer.device, dtype=analyzer.dtype)
 
                 z_cf = z_batch
                 x_cf, _ = analyzer.model(z_cf, c=c_target, rev=True)
             else:
                 z_batch, _ = analyzer.model(x_batch, rev=False)
 
-                current_mean = means[source_idx]  # (B, D)
-                mean_shift = key_mean - current_mean
+                mean_shift = means[target_idx] - means[source_idx]  # (B, D)
 
                 z_cf = z_batch + mean_shift
                 x_cf, _ = analyzer.model(z_cf, rev=True)
