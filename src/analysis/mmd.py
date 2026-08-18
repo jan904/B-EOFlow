@@ -14,7 +14,22 @@ def gaussian_kernel(x, y, sigma=1.0):
     return torch.exp(-(dist**2) / (2 * sigma**2))
 
 
-def mmd(x, y, kernel=gaussian_kernel, sigma=1.0):
+def mmd(x, y, kernel=gaussian_kernel, sigma=1.0, unbiased=False):
+    """Squared MMD between samples x (n, d) and y (m, d).
+
+    unbiased=False (default, the "V-statistic" estimator): each within-sample term
+    sums over all n^2/m^2 pairs including i=i'/j=j', where k(x_i,x_i)=1 always (for
+    gaussian_kernel) - that gives each term a (1 - rho)/n-sized upward bias (rho =
+    the true off-diagonal mean similarity) that shrinks but never fully vanishes as n
+    grows, and differs between two MMD calls made at different n (e.g. ctrl_mmd_dists
+    splitting an already-small real sample in half against mmd_dists comparing the
+    full sample), which can distort comparisons across them.
+
+    unbiased=True: the unbiased U-statistic estimator (Gretton et al., 2012,
+    "A Kernel Two-Sample Test", eq. 3) - excludes the i=i'/j=j' diagonal from each
+    within-sample term instead, so it isn't biased by sample size and stays
+    comparable across MMD calls computed at different n. Requires n_x, n_y >= 2.
+    """
     n_x = x.size(0)
     n_y = y.size(0)
 
@@ -22,18 +37,30 @@ def mmd(x, y, kernel=gaussian_kernel, sigma=1.0):
     yy = kernel(y, y, sigma=sigma)
     xy = kernel(x, y, sigma=sigma)
 
-    term_1 = torch.sum(xx) / (n_x * n_x)
-    term_2 = torch.sum(yy) / (n_y * n_y)
+    if unbiased:
+        if n_x < 2 or n_y < 2:
+            raise ValueError("unbiased MMD requires at least 2 samples per side.")
+        term_1 = (torch.sum(xx) - torch.trace(xx)) / (n_x * (n_x - 1))
+        term_2 = (torch.sum(yy) - torch.trace(yy)) / (n_y * (n_y - 1))
+    else:
+        term_1 = torch.sum(xx) / (n_x * n_x)
+        term_2 = torch.sum(yy) / (n_y * n_y)
+
     term_3 = 2 * torch.sum(xy) / (n_x * n_y)
 
     return term_1 + term_2 - term_3
 
 
-def ctrl_mmd_dists(analyzer, key, iter=10, log1p_transform=False):
+def ctrl_mmd_dists(analyzer, key, iter=10, log1p_transform=False, unbiased=False):
     """log1p_transform: set True when analyzer.adata holds raw counts (e.g. scGen)
     but the counterfactuals being compared against (elsewhere) are log-space, to
     keep the two comparable. Leave False when analyzer.adata is already log-space
-    (INN, scVI wrapper)."""
+    (INN, scVI wrapper).
+
+    unbiased: passed through to `mmd` - see its docstring. Matters most here, since
+    this control/noise-floor estimate splits an already-small real sample in half,
+    making the biased estimator's default sample-size artifact larger than in a
+    same-key `mmd_dists` call comparing the full (unsplit) sample."""
     adata = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
     if log1p_transform:
         sc.pp.normalize_total(adata, target_sum=1e4)
@@ -56,21 +83,27 @@ def ctrl_mmd_dists(analyzer, key, iter=10, log1p_transform=False):
         x1 = torch.tensor(x[idx1], dtype=torch.float32)
         x2 = torch.tensor(x[idx2], dtype=torch.float32)
 
-        ctrl_mmd += mmd(x1, x2, sigma=sigma)
+        ctrl_mmd += mmd(x1, x2, sigma=sigma, unbiased=unbiased)
 
     ctrl_mmd /= iter
 
     return ctrl_mmd.item()
 
 
-def mmd_dists(analyzer, key, sigma=1.0, cf_fn=generate_counterfactuals, log1p_transform=False):
+def mmd_dists(
+    analyzer, key, sigma=1.0, cf_fn=generate_counterfactuals, log1p_transform=False, unbiased=False
+):
     """log1p_transform: set True when both analyzer.adata and cf_fn's counterfactuals
     are raw counts (e.g. scVI, scGen), so both sides get library-size-normalized and
     log1p'd (via scanpy, matching load_data's preprocessing) before the MMD -
     otherwise they'd be compared on a raw-count scale with much larger variance than
     the already-log-space methods (INN, Means), which biases the kernel bandwidth
     (sigma) and inflates MMD values incomparably across methods. Leave False when
-    analyzer.adata is already log-space."""
+    analyzer.adata is already log-space.
+
+    unbiased: passed through to `mmd` - see its docstring. Per-group terms
+    (mmd_per_group) with fewer than 2 cells are skipped when unbiased=True, since the
+    unbiased estimator is undefined for n<2 (division by n*(n-1))."""
     x_cfs, z_cfs, all_source_labels, key_ = cf_fn(analyzer, key=key)
     all_source_labels = np.array(all_source_labels)
 
@@ -92,28 +125,31 @@ def mmd_dists(analyzer, key, sigma=1.0, cf_fn=generate_counterfactuals, log1p_tr
 
     sigma = torch.median(torch.cdist(x_real, x_real))
 
-    mmd_value = mmd(x_real, x_cfs, sigma=sigma)
+    mmd_value = mmd(x_real, x_cfs, sigma=sigma, unbiased=unbiased)
 
     keys = analyzer.adata.obs[analyzer.labels_key].unique()
     mmd_per_group = {}
 
+    min_group_n = 2 if unbiased else 1
     for k in tqdm(keys):
         mask = all_source_labels == k
         x_group = x_cfs[mask]
-        if len(x_group) > 0:
-            mmd_group = mmd(x_real, x_group, sigma=sigma)
+        if len(x_group) >= min_group_n:
+            mmd_group = mmd(x_real, x_group, sigma=sigma, unbiased=unbiased)
             mmd_per_group[k] = mmd_group.item()
 
     return mmd_value.item(), mmd_per_group
 
 
-def global_mmd_by_key(models, keys=None):
+def global_mmd_by_key(models, keys=None, unbiased=False):
     """Global MMD (counterfactual vs. real, pooled over all source groups) for
     every method in `models` (the {"name", "analyzer", "cf_fn", "log1p_transform"}
     registry used in comparison.ipynb), across every held-out key.
 
     keys: cytokine keys to evaluate. If None, uses every non-control label found
     in each method's own analyzer (methods may be trained on different subsets).
+
+    unbiased: passed through to `mmd_dists`/`mmd` - see their docstrings.
 
     Returns {method_name: {key: global_mmd}}.
     """
@@ -128,7 +164,11 @@ def global_mmd_by_key(models, keys=None):
         per_key = {}
         for key in tqdm(method_keys, desc=m["name"]):
             global_mmd, _ = mmd_dists(
-                analyzer, key=key, cf_fn=m["cf_fn"], log1p_transform=m["log1p_transform"]
+                analyzer,
+                key=key,
+                cf_fn=m["cf_fn"],
+                log1p_transform=m["log1p_transform"],
+                unbiased=unbiased,
             )
             per_key[key] = global_mmd
         results[m["name"]] = per_key

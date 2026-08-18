@@ -323,21 +323,32 @@ def cfs_fn_from_adata(adata_pred, source_label=None):
     return cfs_fn
 
 
-def evaluate_leftout_combo_mmd(scoped_analyzer, predictions, key, iter=10, ax=None, plot_dir=None):
+def evaluate_leftout_combo_mmd(
+    scoped_analyzer, predictions, key, iter=10, ax=None, plot_dir=None, unbiased=False
+):
     """Bar chart of MMD between the real held-out-combo cells (found via
     `scoped_analyzer`, see `scoped_analyzer_for_combo`) and each named prediction AnnData
     in `predictions` (e.g. {"Normal": adata_ood_normal, "Shift": adata_ood_shift}), plus
     the random-split MMD among the real cells themselves (mmd.ctrl_mmd_dists) as a noise
     floor - how much MMD to expect even between two halves of real data.
 
+    unbiased: passed through to `mmd.ctrl_mmd_dists`/`mmd.mmd_dists` (see their
+    docstrings) - worth setting True here specifically, since the control MMD splits
+    an already-small real held-out-combo sample in half while each prediction's MMD
+    compares against the full sample, and the biased estimator's default sample-size
+    artifact is largest exactly at small n.
+
     Returns {name: global_mmd} and the control MMD.
     """
-    ctrl_mmd = ctrl_mmd_dists(scoped_analyzer, key=key, iter=iter)
+    ctrl_mmd = ctrl_mmd_dists(scoped_analyzer, key=key, iter=iter, unbiased=unbiased)
 
     results = {}
     for name, adata_pred in predictions.items():
         global_mmd, _ = mmd_dists(
-            scoped_analyzer, key=key, cf_fn=cfs_fn_from_adata(adata_pred, source_label=name)
+            scoped_analyzer,
+            key=key,
+            cf_fn=cfs_fn_from_adata(adata_pred, source_label=name),
+            unbiased=unbiased,
         )
         results[name] = global_mmd
 
