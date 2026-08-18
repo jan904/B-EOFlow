@@ -10,7 +10,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
-from SEACells.core import SEACells, summarize_by_SEACell
+from sklearn.cluster import KMeans
 
 
 class AdataDataset(Dataset):
@@ -458,7 +458,7 @@ def get_metacell_cache_path(
     """Deterministic `cache_path` for `build_metacells`, so every caller building
     metacells from the same (dataset, top_genes, donors, group_keys) combination -
     regardless of which model's own `log_transform` it wants back - resolves to the
-    same file and shares one on-disk cache instead of re-running SEACells per notebook.
+    same file and shares one on-disk cache instead of re-clustering per notebook.
     """
     donor_part = "-".join(donors) if donors else "all"
     group_part = "-".join(group_keys)
@@ -471,17 +471,16 @@ def build_metacells(
     group_keys=["cell_type", "cytokine"],
     use_rep="X_pca",
     cells_per_metacell=20,
-    n_neighbors=15,
     log_transform=True,
     cache_path=None,
     labels_key=None,
     control_label=None,
 ):
     """Groups by the exact `group_keys` combination first, then builds metacells
-    within each group via SEACells (archetypal analysis on `use_rep`) - grouping
-    before clustering, rather than clustering globally, is what guarantees every
-    metacell is "pure": built only from cells sharing the same `group_keys` values,
-    never mixing e.g. two different (cytokine, cell_type) combos.
+    within each group by k-means on `use_rep`, summing raw counts within each
+    cluster - grouping before clustering, rather than clustering globally, is what
+    guarantees every metacell is "pure": built only from cells sharing the same
+    `group_keys` values, never mixing e.g. two different (cytokine, cell_type) combos.
 
     The clustering embedding is always computed from a log-normalized copy of
     `adata.layers["counts"]`, regardless of what `adata.X` holds on entry - grouping
@@ -497,7 +496,7 @@ def build_metacells(
     `cache_path`: optional path to an `.h5ad` file caching the metacells *before* the
     `log_transform` step - since metacell construction never depends on `log_transform`
     (see above), one cache file is valid for every caller regardless of their own
-    `log_transform` choice. If the file exists, it's loaded directly and SEACells is
+    `log_transform` choice. If the file exists, it's loaded directly and clustering is
     skipped entirely (only the cheap `log_transform` step below still runs, and `adata`
     is never touched - it may be `None`); if not, metacells are built as usual from
     `adata` (required in this case) and the pre-`log_transform` result is written to
@@ -510,7 +509,7 @@ def build_metacells(
     values), stashed into the cached file's `.uns` when a fresh cache is written, so a
     later cache hit can hand them straight back too. Prefer calling `load_metacells`
     instead of this function directly - it wires this all together, including
-    skipping `load_data` itself (not just SEACells) on a cache hit.
+    skipping `load_data` itself (not just the clustering) on a cache hit.
     """
 
     if cache_path is not None and os.path.exists(cache_path):
@@ -525,50 +524,39 @@ def build_metacells(
         sc.pp.pca(counts_adata, n_comps=50)
         adata.obsm[use_rep] = counts_adata.obsm[use_rep]
 
-        group_metacells = []
+        metacells = []
+        metacell_obs = []
 
         for group_vals, group_adata in adata.obs.groupby(group_keys):
             idx = group_adata.index
-            sub = adata[idx].copy()
+            sub = adata[idx]
 
-            # SEACells builds a kNN graph on `n_neighbors`, so a group needs at least
-            # that many cells on top of the usual cells_per_metacell floor
-            if len(sub) < max(cells_per_metacell, n_neighbors + 1):
+            if len(sub) < cells_per_metacell:
                 continue
 
             num_metacells = len(sub) // cells_per_metacell
+            X_rep = sub.obsm[use_rep]
+            labels = KMeans(n_clusters=num_metacells, random_state=0).fit_predict(X_rep)
 
-            model = SEACells(
-                sub,
-                build_kernel_on=use_rep,
-                n_SEACells=num_metacells,
-                n_neighbors=n_neighbors,
-                verbose=False,
-            )
-            model.construct_kernel_matrix()
-            model.initialize_archetypes()
-            model.fit()
+            for k in range(num_metacells):
+                mask = labels == k
+                if mask.sum() < 2:
+                    continue
 
-            sub.obs["SEACell"] = model.get_hard_assignments()["SEACell"]
-            n_cells = sub.obs["SEACell"].value_counts()
+                metacell_x = np.asarray(sub.layers["counts"][mask].sum(axis=0))
+                metacells.append(metacell_x)
 
-            group_meta = summarize_by_SEACell(sub, summarize_layer="counts")
-            group_meta.obs["n_cells"] = n_cells.reindex(group_meta.obs_names).to_numpy()
-            # drop degenerate 1-cell SEACells, mirroring the old `mask.sum() < 2` filter
-            group_meta = group_meta[group_meta.obs["n_cells"] >= 2].copy()
+                obs_dict = {
+                    key: group_vals[i] if isinstance(group_vals, tuple) else group_vals
+                    for i, key in enumerate(group_keys)
+                }
+                obs_dict["n_cells"] = mask.sum()
+                metacell_obs.append(obs_dict)
 
-            for i, key in enumerate(group_keys):
-                group_meta.obs[key] = (
-                    group_vals[i] if isinstance(group_vals, tuple) else group_vals
-                )
-
-            group_metacells.append(group_meta)
-
-        meta_adata = ad.concat(group_metacells, join="outer")
-        meta_adata.var = adata.var.copy()  # summarize_by_SEACell only keeps var_names
-        # SEACell names restart from 0 within each group, so they collide across groups
-        # once concatenated
-        meta_adata.obs_names_make_unique()
+        X = np.vstack(metacells)
+        meta_obs = pd.DataFrame(metacell_obs)
+        meta_obs.index = meta_obs.index.astype(str)  # h5ad needs string obs_names
+        meta_adata = ad.AnnData(X=X, var=adata.var.copy(), obs=meta_obs)
         meta_adata.layers["counts"] = meta_adata.X.copy()
 
         if cache_path is not None:
@@ -618,7 +606,7 @@ def load_metacells(
 
     If a cache for this (dataset_name, top_genes, donors, group_keys) combination
     already exists, `load_data` is skipped entirely - so the multi-GB source h5ad
-    read, cell/gene filtering, and HVG selection never run, not just SEACells - and
+    read, cell/gene filtering, and HVG selection never run, not just the clustering - and
     the metacells are returned straight from the cache, with labels_key/control_label
     (load_data's other two return values) recovered from the cache's own `.uns`. On a
     cache miss, this calls `load_data(dataset_name, top_genes, cell_types=None,

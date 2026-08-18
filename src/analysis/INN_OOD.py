@@ -39,8 +39,8 @@ def observed_combos_from_adata(adata, conditions):
     Needed because `combo_categories` is the full Cartesian product of the conditions
     (see `data_utils.get_condition_vocab`), so membership in it says nothing about
     whether a combo had training data: combos that were dropped upstream - e.g. by
-    `build_metacells`, which skips any group with fewer than
-    `max(cells_per_metacell, n_neighbors + 1)` cells - still hold a reserved `means` row
+    `build_metacells`, which skips any group with fewer than `cells_per_metacell`
+    cells - still hold a reserved `means` row
     that never receives a gradient (or an `update_means_epoch` update) and therefore
     stays at its initialization. Averaging such rows into a treatment shift mixes pure
     initialization noise into the estimate at full weight.
