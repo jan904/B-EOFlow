@@ -194,9 +194,24 @@ def get_loss(
             kwargs_data, z=z, c=c_prior, means=model.means, log_sigma=model.log_sigma
         )  # NLL per dimension
 
-        factor = (z.shape[1] - 11) / len(model.means_active) / model_config.partition_divisor
+        # The prior is partitioned: the first `means_dim` latent dims carry the
+        # condition mean, the remaining N_dim - means_dim dims share a N(0,1) prior
+        # across all conditions. `factor` rebalances the two blocks so the condition
+        # dims aren't drowned out by the far more numerous shared dims -
+        # (N_dim - means_dim) / means_dim equalises their total weight, and
+        # `partition_divisor` tempers that from there (same convention as the
+        # `supervise_latent_meaning == "both"` branch below).
+        #
+        # This used to read `means_active.shape[0]` / `len(means_active)` - both the
+        # number of components (K), not the number of condition-carrying dims - while
+        # indexing `dim_weight` by `shape[1]`. With K=198, means_dim=396, N_dim=1937,
+        # divisor=8 that produced 1.098 instead of 0.486: a dimension-vs-component mixup
+        # that also happened to be silently correct only when partition_divisor equalled
+        # latent_per_condition.
+        means_dim = model.means_active.shape[1]
+        factor = (N_dim - means_dim) / means_dim / model_config.partition_divisor
         dim_weight = torch.ones(N_dim, device=device)
-        dim_weight[: len(model.means_active)] = factor  # upweight or downweight the first n dims
+        dim_weight[:means_dim] = factor  # upweight or downweight the condition dims
 
         NLL_z_i = NLL_z_i * dim_weight[None, :]  # broadcast across batch
 

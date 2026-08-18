@@ -107,6 +107,12 @@ def train_INN(
             logger.info(f"Learning rate means: {model_config.lr_means}")
             logger.info(f"Supervise latent meaning: {supervise_latent_meaning}")
             logger.info(f"Latents per condition: {model_config.latent_per_condition}")
+            # resolved value, not the config's None-means-auto (see
+            # INNs_model.default_means_seperation)
+            logger.info(
+                f"Means separation: {getattr(model, 'means_seperation', None)} "
+                f"(config: {model_config.means_seperation})"
+            )
             logger.info(f"trainable sigma: {model_config.trainable_sigma}")
             logger.info("---------------------------------------------------------")
             logger.info("")
@@ -374,8 +380,24 @@ def train_INN(
 
 
 def update_means_epoch(model, dataloader, device, momentum=0.9):
-    cluster_sums = torch.zeros_like(model.means)  # (K, D)
-    counts = torch.zeros(model.means.shape[0], 1, device=device)  # (K, 1)
+    """EMA-update the mixture-prior means towards the per-combo empirical latent means.
+
+    Writes into `model.means_active` - the actual Parameter - and not `model.means`.
+    `means` is a property that returns `torch.cat([means_active, means_zero])` whenever
+    `latent_per_condition` is set (i.e. means_dim < N_dim), so the old
+    `model.means[mask] = ...` assigned into that freshly built temporary and the update
+    was silently discarded: with `latent_per_condition` set this function was a no-op,
+    and the means stayed at their initialization for the whole run.
+
+    Only the first `means_dim` latent dimensions are parameters; the remaining dims are
+    the structurally-zero `means_zero` buffer (shared N(0,1) prior across conditions by
+    design), so the empirical mean is taken over the active dims only.
+    """
+    means = model.means_active  # (K, means_dim), the parameter itself
+    means_dim = means.shape[1]
+
+    cluster_sums = torch.zeros_like(means)  # (K, means_dim)
+    counts = torch.zeros(means.shape[0], 1, device=device)  # (K, 1)
 
     model.eval()
     with torch.no_grad():
@@ -386,9 +408,9 @@ def update_means_epoch(model, dataloader, device, momentum=0.9):
             z, _ = model(x, c=None, rev=False)
 
             counts += c[0].sum(dim=0, keepdim=True).T
-            cluster_sums += c[0].T @ z
+            cluster_sums += c[0].T @ z[:, :means_dim]
 
-    mask = counts.squeeze() > 0
-    epoch_means = cluster_sums[mask] / counts[mask]
-    model.means[mask] = (1 - momentum) * model.means[mask] + momentum * epoch_means
+        mask = counts.squeeze() > 0
+        epoch_means = cluster_sums[mask] / counts[mask]
+        means.data[mask] = (1 - momentum) * means.data[mask] + momentum * epoch_means
     model.train()

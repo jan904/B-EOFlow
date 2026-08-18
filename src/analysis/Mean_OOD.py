@@ -26,10 +26,23 @@ def _control_mean(adata, holdout_combo, condition_key, control_label, cell_type_
     return x_control, x_control.mean(axis=0)
 
 
-def _combo_adata(x, holdout_combo, var=None):
+def _combo_adata(x, holdout_combo, var=None, clamp_min=0.0):
+    """`clamp_min`: floor applied to the predicted expression before it becomes `.X`,
+    matching `INN_OOD._combo_adata` (see its docstring) and the `.clamp(min=0)` the scGen
+    path already applies.
+
+    Shifting control cells by a mean delta in log1p space can push genes below zero, which
+    is outside the non-negative space the real cells live in. Keeping this convention
+    identical across every method is what makes the MMD comparison apples-to-apples -
+    clamping one method's predictions but not another's changes the ranking on its own.
+    Pass None to keep the unclamped values.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    if clamp_min is not None:
+        x = np.clip(x, clamp_min, None)
     obs = pd.DataFrame({key: [value] * x.shape[0] for key, value in holdout_combo.items()})
     return ad.AnnData(
-        X=np.asarray(x, dtype=np.float32),
+        X=x,
         obs=obs,
         var=var.copy() if var is not None else None,
     )

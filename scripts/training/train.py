@@ -61,6 +61,8 @@ def parse_args():
     )
     parser.add_argument("--lam_supervise", type=float, default=1.0)
     parser.add_argument("--partition_divisor", type=int, default=8)
+    # None -> 2*sqrt(2 ln K), see INNs_model.default_means_seperation
+    parser.add_argument("--means_seperation", type=float, default=None)
     parser.add_argument("--latent_per_condition", type=int, default=None)
     parser.add_argument("--train_sigma", action="store_true")
     parser.add_argument("--lr_sigma", type=float, default=5e-4)
@@ -312,7 +314,7 @@ def main():
             condition_type=args.condition_type,
             trainable_means=args.train_means,
             lr_means=args.lr_means,
-            means_seperation=2.0,
+            means_seperation=args.means_seperation,
             n_clusters=len(dataset.cats[0].categories),
             supervise_latent_meaning=args.supervise_latent_meaning,
             ctrl_idx=ctrl_idx,

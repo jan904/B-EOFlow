@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
+
 import FrEIA.framework as Ff
 import FrEIA.modules as Fm
 import FrEIA.modules.splines as Fms
@@ -11,6 +13,26 @@ from FrEIA.modules import InvertibleModule
 from typing import Callable, Union
 import geotorch
 import schedulefree
+
+
+def default_means_seperation(n_components):
+    """Component separation for a K-component mixture with unit-variance components:
+
+        d = 2 * sqrt(2 * ln K)
+
+    `sqrt(2 ln K)` is the scale at which the maximum of K standard normal variables
+    concentrates, so it's the distance at which a component's own samples stop being
+    routinely closer to some *other* component's mean than to their own. Below it the
+    components are not reliably distinguishable no matter how well the flow is trained;
+    the factor 2 puts each mean that far outside the confusion radius rather than right
+    on it. Growing like sqrt(ln K) means adding components costs very little extra
+    spread - K=11 gives 6.2, K=198 gives 6.5, K=2000 gives 7.8.
+
+    Note this is the *pairwise distance* between two component means, not their norm -
+    `ModelWithMixturePrior` converts (orthonormal rows at norm `d/sqrt(2)` sit `d` apart).
+    """
+    # K=1 has nothing to separate; clamp so the rule stays well-defined (ln 1 = 0).
+    return 2.0 * math.sqrt(2.0 * math.log(max(int(n_components), 2)))
 
 
 class ModelWithMixturePrior(nn.Module):
@@ -23,7 +45,7 @@ class ModelWithMixturePrior(nn.Module):
         trainable_means=False,
         trainable_sigma=False,
         init_sigma=1.0,
-        means_seperation=2.0,
+        means_seperation=None,
         latent_per_condition=None,
     ):
         super().__init__()
@@ -43,9 +65,28 @@ class ModelWithMixturePrior(nn.Module):
                 self.means_dim = latent_per_condition * n_components
 
             # learnable part: (n_components, means_dim)
+            #
+            # `means_seperation` is the pairwise distance between two component means,
+            # in units of the prior's per-dimension std. None resolves to
+            # `default_means_seperation(K)` = 2*sqrt(2 ln K) - see there. `orthogonal_`
+            # gives unit-norm rows, and two orthogonal vectors of norm r sit r*sqrt(2)
+            # apart, so the norm needed for a separation of d is d/sqrt(2).
+            #
+            # This used to scale by `N_dim**0.5 * means_seperation`, putting the means at
+            # ~2*sqrt(N_dim) - twice the radius of a typical latent point, and sqrt(2)*
+            # that apart. From there gradient descent never restructured them (the NLL
+            # gradient w.r.t. mu vanishes as soon as the flow maps each combo onto its
+            # assigned point), so the means stayed at their random orthogonal init: the
+            # arrangement of conditions in latent space was fixed noise, and differences
+            # between means - what counterfactual latent arithmetic relies on - carried
+            # no information about the conditions.
+            if means_seperation is None:
+                means_seperation = default_means_seperation(n_components)
+            self.means_seperation = float(means_seperation)  # resolved, for logging
+
             means_active = torch.zeros(n_components, self.means_dim)
             torch.nn.init.orthogonal_(means_active)
-            means_active = means_active * N_dim**0.5 * means_seperation
+            means_active = means_active * (self.means_seperation / math.sqrt(2.0))
             self.means_active = torch.nn.Parameter(means_active, requires_grad=trainable_means)
 
             self.log_sigma = None
@@ -70,6 +111,7 @@ class ModelWithMixturePrior(nn.Module):
             self.means_active = None
             self.means_zero = None
             self.log_sigma = None
+            self.means_seperation = None
 
     @property
     def means(self):

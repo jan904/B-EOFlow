@@ -50,6 +50,14 @@ class BaseModelConfig:
 class INNConfig(BaseModelConfig):
     model_type: str = field(init=False, default="inn")
 
+    # Pairwise distance between two mixture-component means, in units of the prior's
+    # per-dimension std. None (default) resolves at model-build time to
+    # `INNs_model.default_means_seperation(n_clusters)` = 2*sqrt(2 ln K), which is the
+    # point where components stop being routinely confusable; see that function.
+    # Overrides BaseModelConfig's fixed 2.0 (kept there for the VAE path, whose
+    # initialization still uses its own scale convention).
+    means_seperation: float = None
+
     N_blocks: int = 12
     subnet_fc: callable = None
     ch_hidden: int = 2048

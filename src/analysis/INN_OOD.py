@@ -31,6 +31,24 @@ def _other_cell_types(combo_categories, combo_order, cell_type_key, exclude):
     return [v for v in cell_values if v != exclude]
 
 
+def observed_combos_from_adata(adata, conditions):
+    """Set of '__'-joined combo labels that actually have rows in `adata` - pass the
+    *training* adata (post-holdout) so this reflects which combos the model's mixture
+    means were ever fitted on.
+
+    Needed because `combo_categories` is the full Cartesian product of the conditions
+    (see `data_utils.get_condition_vocab`), so membership in it says nothing about
+    whether a combo had training data: combos that were dropped upstream - e.g. by
+    `build_metacells`, which skips any group with fewer than
+    `max(cells_per_metacell, n_neighbors + 1)` cells - still hold a reserved `means` row
+    that never receives a gradient (or an `update_means_epoch` update) and therefore
+    stays at its initialization. Averaging such rows into a treatment shift mixes pure
+    initialization noise into the estimate at full weight.
+    """
+    combined = adata.obs[list(conditions)].astype(str).agg("__".join, axis=1)
+    return set(combined.unique().tolist())
+
+
 def _average_treatment_shift(
     model,
     combo_categories,
@@ -40,15 +58,25 @@ def _average_treatment_shift(
     control_label,
     cell_type_key,
     target_treatment,
+    observed_combos=None,
 ):
     """Average, across every other cell type, of the learned latent-mean shift between
     `target_treatment` and `control_label` - the same estimate
-    `estimate_leftout_combo_mean` adds to the held-out combo's control mean."""
+    `estimate_leftout_combo_mean` adds to the held-out combo's control mean.
+
+    `observed_combos`: set of combo labels that had training data (see
+    `observed_combos_from_adata`). Cell types whose control- or treatment-side combo is
+    missing from it are skipped, so untrained `means` rows - still at their random
+    initialization - can't contribute to the average. Leaving this as None keeps every
+    combo in `combo_categories`, which is only safe if the design really is full
+    factorial in the *training* data.
+    """
     cell_values = _other_cell_types(
         combo_categories, combo_order, cell_type_key, holdout_combo[cell_type_key]
     )
 
     shifts = []
+    skipped_unobserved = []
     for other_cell in cell_values:
         other_control = {**holdout_combo, cell_type_key: other_cell, condition_key: control_label}
         other_treatment = {
@@ -66,23 +94,51 @@ def _average_treatment_shift(
         ):
             continue
 
+        if observed_combos is not None and (
+            other_control_label not in observed_combos
+            or other_treatment_label not in observed_combos
+        ):
+            skipped_unobserved.append(other_cell)
+            continue
+
         other_control_idx = combo_categories.index(other_control_label)
         other_treatment_idx = combo_categories.index(other_treatment_label)
         shifts.append(model.means[other_treatment_idx] - model.means[other_control_idx])
 
+    if skipped_unobserved:
+        print(
+            f"[_average_treatment_shift] skipped {len(skipped_unobserved)} cell type(s) with no "
+            f"training data for '{target_treatment}' and/or '{control_label}': "
+            f"{sorted(skipped_unobserved)}"
+        )
+
     if not shifts:
         raise ValueError(
             "No valid shifts were found for the other cell types. "
-            "Check that your `combo_categories` and holdout configuration match the training design."
+            "Check that your `combo_categories` and holdout configuration match the training "
+            "design, and that `observed_combos` isn't excluding every cell type."
         )
 
     return torch.stack(shifts).mean(dim=0)
 
 
-def _combo_adata(x, holdout_combo, var=None):
+def _combo_adata(x, holdout_combo, var=None, clamp_min=0.0):
+    """`clamp_min`: floor applied to the decoded expression before it becomes `.X`.
+
+    The flow's decoder is unconstrained and happily emits negative values, but both the
+    log1p-normalized and raw-count spaces it is trained on are non-negative, so those
+    negatives are decoding artefacts rather than predictions. Left in, they inflate every
+    downstream distance against the (non-negative) real cells - and the scGen comparison
+    path in `comparison.ipynb` already clamps its own samples, so leaving these unclamped
+    handicapped the flow in the benchmark rather than measuring it. Pass None to keep the
+    raw decoder output.
+    """
+    x = x.detach().cpu().numpy()
+    if clamp_min is not None:
+        x = np.clip(x, clamp_min, None)
     obs = pd.DataFrame({key: [value] * x.shape[0] for key, value in holdout_combo.items()})
     return ad.AnnData(
-        X=x.detach().cpu().numpy(),
+        X=x,
         obs=obs,
         var=var.copy() if var is not None else None,
     )
@@ -96,6 +152,7 @@ def estimate_leftout_combo_mean(
     condition_key,
     control_label,
     cell_type_key=None,
+    observed_combos=None,
 ):
     """Estimate and cache the mean for a held-out combo.
 
@@ -108,6 +165,11 @@ def estimate_leftout_combo_mean(
 
     This is useful when the model reserves a slot for the held-out combo but the empirical
     mean was never learned because that combo was left out.
+
+    `observed_combos`: set of combo labels with training data (see
+    `observed_combos_from_adata`); cell types missing either side of the shift are then
+    excluded from the average instead of contributing an untrained, still-at-init `means`
+    row. Strongly recommended - `combo_categories` alone cannot tell the two apart.
 
     The function writes the estimated row directly into the underlying mixture-prior means
     tensor so the model can sample from the held-out combo without requiring a real latent
@@ -153,6 +215,7 @@ def estimate_leftout_combo_mean(
         control_label,
         cell_type_key,
         target_treatment,
+        observed_combos=observed_combos,
     )
 
     control_target_idx = combo_categories.index(control_target_label)
@@ -180,6 +243,7 @@ def sample_leftout_combo_normal(
     sigma=1.0,
     var=None,
     dtype=torch.float32,
+    observed_combos=None,
 ):
     """OOD sampling strategy 1: draw the held-out combo's cells from an isotropic Normal
     distribution centered at its estimated latent mean (`estimate_leftout_combo_mean`),
@@ -187,8 +251,10 @@ def sample_leftout_combo_normal(
     (same convention as `cf_expressions.sample_from_means`), else the constant `sigma`.
     Decodes the samples back through the flow to expression space.
 
-    Returns an AnnData of the sampled cells (`.X` = decoded expression), with one obs
-    column per entry of `holdout_combo` set to its value.
+    Returns an AnnData of the sampled cells (`.X` = decoded expression, floored at 0 -
+    see `_combo_adata`), with one obs column per entry of `holdout_combo` set to its value.
+
+    `observed_combos`: forwarded to `estimate_leftout_combo_mean` - see there.
     """
     mean = estimate_leftout_combo_mean(
         model=model,
@@ -198,6 +264,7 @@ def sample_leftout_combo_normal(
         condition_key=condition_key,
         control_label=control_label,
         cell_type_key=cell_type_key,
+        observed_combos=observed_combos,
     ).detach()
 
     combo_order = list(conditions)
@@ -229,6 +296,7 @@ def sample_leftout_combo_shift(
     cell_type_key=None,
     device=None,
     dtype=torch.float32,
+    observed_combos=None,
 ):
     """OOD sampling strategy 2: encode real control cells of the held-out combo's cell
     type, shift each one in latent space by the average treatment-control mean shift
@@ -237,8 +305,10 @@ def sample_leftout_combo_shift(
     each control cell's own latent structure (e.g. cell state, library size) instead of
     drawing fresh isotropic noise around a single point.
 
-    Returns an AnnData of the shifted cells (`.X` = decoded expression), one row per real
-    control cell of the held-out combo's cell type.
+    Returns an AnnData of the shifted cells (`.X` = decoded expression, floored at 0 -
+    see `_combo_adata`), one row per real control cell of the held-out combo's cell type.
+
+    `observed_combos`: forwarded to `_average_treatment_shift` - see there.
     """
     cell_type_key = _resolve_cell_type_key(conditions, condition_key, cell_type_key)
     combo_order = list(conditions)
@@ -258,6 +328,7 @@ def sample_leftout_combo_shift(
         control_label,
         cell_type_key,
         target_treatment,
+        observed_combos=observed_combos,
     ).detach()
 
     control_mask = (adata.obs[cell_type_key] == holdout_combo[cell_type_key]) & (
