@@ -61,20 +61,59 @@ class SCGENMixturePriorWrapper(nn.Module):
     This wrapper only bridges the *interface* to what Analyzer expects: scGen has no
     learned mixture-prior means parameter, so `.means` is the empirical per-condition
     mean latent representation instead, computed once at construction time.
+
+    Pass `conditions` (e.g. `["cytokine", "cell_type"]`) to index `.means` by the full
+    combo instead of `labels_key` alone - the same "__"-joined combo label
+    AdataDataset/get_condition_vocab use, so this can drop into the
+    src.analysis.INN_OOD.estimate_leftout_combo_mean/sample_leftout_combo_normal/
+    sample_leftout_combo_shift machinery built for the INN's mixture prior (nothing in
+    those functions is actually INN-specific - they only touch `.means`/`.means_active`/
+    `.log_sigma`/`forward()`). Pass `combo_categories` (from get_condition_vocab on the
+    full, pre-holdout adata)
+    alongside it so a held-out combo still reserves a slot (filled with zeros here,
+    ready for estimate_leftout_combo_mean to overwrite) instead of vanishing because no
+    real cells matched it in whatever `adata` this was constructed from.
+
+    For a leave-one-combo-out setup, construct this wrapper from `train_adata` (the
+    holdout-excluded set returned by split_holdout_combinations), not the full adata -
+    scgen.SCGEN.setup_anndata/.train() only ever needs train_adata too, since scGen
+    conditions on `batch_key`/`labels_key` as separate covariates rather than a crossed
+    combo, so holding out one (condition, cell_type) pair never empties either
+    covariate's own vocabulary and needs no special handling on the training side.
+    Passing the full adata here instead would leak the real held-out combo's cells into
+    its "estimated" mean, defeating the point of estimating it.
     """
 
-    def __init__(self, scgen_model, adata, labels_key, target_sum=1e4, normalize_output=False):
+    def __init__(
+        self,
+        scgen_model,
+        adata,
+        labels_key,
+        target_sum=1e4,
+        normalize_output=False,
+        conditions=None,
+        combo_categories=None,
+    ):
         super().__init__()
         self.model = scgen_model
         self.module = scgen_model.module
         self.N_dim = self.module.n_latent
         self.normalize_output = normalize_output
 
-        # order must match AdataDataset's `cats[0]` (see generate_counterfactuals),
-        # i.e. the categories of adata.obs[labels_key] as pandas would sort them
-        cats = pd.Categorical(adata.obs[f"{labels_key}"].astype(str))
+        # order must match AdataDataset's `cats[0]` (see generate_counterfactuals) /
+        # get_condition_vocab's combo_categories, i.e. adata.obs[conditions] joined in
+        # that same column order
+        conditions = list(conditions) if conditions is not None else [labels_key]
+        combo_labels = adata.obs[conditions].astype(str).agg("__".join, axis=1)
+        cats = pd.Categorical(combo_labels, categories=combo_categories)
+        self.combo_categories = list(cats.categories)
+
         z = self.model.get_latent_representation(adata)
-        means = np.stack([z[cats.codes == i].mean(axis=0) for i in range(len(cats.categories))])
+        means = np.zeros((len(cats.categories), z.shape[1]), dtype=np.float32)
+        for i in range(len(cats.categories)):
+            mask = cats.codes == i
+            if mask.any():
+                means[i] = z[mask].mean(axis=0)
         self.register_buffer("_means", torch.tensor(means, dtype=torch.float32))
         self.register_buffer(
             "log_target_sum", torch.log(torch.tensor(float(target_sum))).reshape(1, 1)
@@ -118,11 +157,24 @@ class SCGENMixturePriorWrapper(nn.Module):
         total, being actual non-negative counts, doesn't have this problem and is what
         the cell's depth "should" be regardless of how much reconstruction mass clipping
         wiped out.
+
+        Also accepts `celltype_to_predict` (mutually exclusive with adata_to_predict, per
+        the underlying scgen.SCGEN.predict) to predict every real *control* cell of that
+        cell type found in the model's own registered adata - the official scGen
+        leave-one-combo/cell-type-out pattern - rather than an explicit adata passed in.
+        normalize_output=True still requires adata_to_predict, since there's no other
+        source for each cell's real per-cell total to normalize against.
         """
-        if "adata_to_predict" not in kwargs:
+        if kwargs.get("adata_to_predict") is None and kwargs.get("celltype_to_predict") is None:
             raise ValueError(
-                "SCGENMixturePriorWrapper.predict requires adata_to_predict as a "
-                "keyword argument (passed straight through to scgen.SCGEN.predict)."
+                "SCGENMixturePriorWrapper.predict requires adata_to_predict or "
+                "celltype_to_predict as a keyword argument (passed straight through to "
+                "scgen.SCGEN.predict)."
+            )
+        if self.normalize_output and kwargs.get("adata_to_predict") is None:
+            raise ValueError(
+                "normalize_output=True requires adata_to_predict (not celltype_to_predict) "
+                "to normalize against the source cells' own real per-cell total."
             )
 
         pred_adata, delta = self.model.predict(*args, **kwargs)

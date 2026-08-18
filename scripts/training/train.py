@@ -6,8 +6,8 @@ import argparse
 from src.model.data_utils import (
     load_data,
     prepare_train_test_data,
-    get_condition_shapes,
-    build_metacells,
+    get_condition_vocab,
+    load_metacells,
     split_holdout_combinations,
 )
 from src.model.training import train_model
@@ -96,24 +96,35 @@ def main():
     # Data loading and preprocessing
     holdout_combo = None
     if args.use_metacells:
-        adata, _, control_label = load_data(
-            args.dataset, args.top_genes, log_transform=True, cell_types=None
-        )
         metacell_group_keys = args.metacell_group_keys or args.conditions
-        adata = build_metacells(adata, group_keys=metacell_group_keys)
-
-        if args.holdout_combo is not None:
-            holdout_combo = _parse_holdout_combo(args.holdout_combo)
-            adata, _ = split_holdout_combinations(
-                adata, [holdout_combo], group_keys=metacell_group_keys
-            )
-            print(
-                f"Held out combo {holdout_combo}; training on the remaining {adata.n_obs} metacells."
-            )
+        # donors=["Donor1"]: no --donors CLI flag exists yet, matching load_data's own
+        # default - keep in sync if that ever becomes configurable, so a cache built
+        # under one donor set is never mistaken for another.
+        adata, _, control_label = load_metacells(
+            args.dataset, args.top_genes, metacell_group_keys, donors=["Donor1"]
+        )
     else:
         adata, _, control_label = load_data(
             args.dataset, args.top_genes, log_transform=True, cell_types=["CD4 Memory"]
         )
+
+    # Fix the combo/condition vocabulary from the full (pre-holdout) data, so a held-out
+    # combo still gets a reserved slot in the one-hot encoding and the mixture-prior means,
+    # instead of vanishing along with its rows.
+    condition_categories = None
+    combo_categories = None
+    if args.conditions is not None:
+        condition_categories, combo_categories = get_condition_vocab(adata, args.conditions)
+
+    if args.use_metacells and args.holdout_combo is not None:
+        holdout_combo = _parse_holdout_combo(args.holdout_combo)
+        adata, _ = split_holdout_combinations(
+            adata, [holdout_combo], group_keys=metacell_group_keys
+        )
+        print(
+            f"Held out combo {holdout_combo}; training on the remaining {adata.n_obs} metacells."
+        )
+
     dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
         adata,
         args.batch_size,
@@ -122,6 +133,8 @@ def main():
         counts=args.use_counts,
         label_key=args.conditions,
         test_size=args.test_size,
+        combo_categories=combo_categories,
+        condition_categories=condition_categories,
     )
     ctrl_idx = 0  # dataset.cats[0].categories.tolist().index(control_label)
 
@@ -131,7 +144,7 @@ def main():
     # Get condition shapes for model initialization
     condition_shapes = None
     if args.conditions is not None:
-        condition_shapes = get_condition_shapes(adata, args.conditions)
+        condition_shapes = [len(condition_categories[cond]) for cond in args.conditions]
 
     top_genes = min(args.top_genes, D_dim)
 
@@ -310,6 +323,8 @@ def main():
             lr_sigma=args.lr_sigma,
             balance_classes=args.balance_classes,
             holdout_combos=[holdout_combo] if holdout_combo is not None else None,
+            combo_categories=combo_categories,
+            condition_categories=condition_categories,
         )
 
         # Model initialization

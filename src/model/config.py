@@ -27,6 +27,8 @@ class BaseModelConfig:
     partition_divisor: int = 8
     balance_classes: bool = False
     holdout_combos: list = None
+    combo_categories: list = None
+    condition_categories: dict = None
 
     def __post_init__(self):
         self._validate_condition_type()
@@ -73,6 +75,7 @@ class VAEConfig(BaseModelConfig):
     model_type: str = field(init=False, default="vae")
 
     condition: str = "cytokine"
+    conditions: list = None
     beta: float = 1.0
 
     def __post_init__(self):

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal, kl_divergence as kl
 import numpy as np
+import pandas as pd
 from anndata import AnnData
 
 from scvi.model.base import BaseModelClass, UnsupervisedTrainingMixin, VAEMixin
@@ -20,14 +21,46 @@ from scvi.data.fields import (
 from src.model.VAE.VAE_training import MixturePriorTrainingPlan
 
 
+def assign_cluster_idx(adata, conditions=None, combo_categories=None, condition="cytokine"):
+    """Builds `adata.obs["cluster_idx"]`, the mixture-prior component id
+    MixturePriorSCVI clusters/conditions on, and returns the resulting number of
+    components.
+
+    With `conditions` (2+ obs columns, e.g. ["cytokine", "cell_type"]), crosses them into
+    the "__"-joined combo label (matching AdataDataset/get_condition_vocab's convention),
+    assigned with a category dtype pinned to `combo_categories` - built from the full,
+    pre-holdout adata via get_condition_vocab. scvi's own CategoricalObsField registration
+    does `adata.obs[cluster_key].astype("category")` with no explicit categories, which
+    preserves an already-fixed category dtype rather than re-inferring it from what's
+    present - so a held-out combo still reserves a component slot (simply never selected
+    by any real training batch, exactly like INN's ModelWithMixturePrior.means_active
+    rows) instead of vanishing once its rows are removed.
+
+    Without `conditions`, falls back to the single `condition` column's own inferred
+    codes (this function's pre-existing single-condition behavior).
+    """
+    if conditions is not None:
+        combo_labels = adata.obs[list(conditions)].astype(str).agg("__".join, axis=1)
+        adata.obs["cluster_idx"] = pd.Categorical(combo_labels, categories=combo_categories)
+        return len(adata.obs["cluster_idx"].cat.categories)
+
+    adata.obs["cluster_idx"] = adata.obs[condition].astype("category").cat.codes
+    return adata.obs["cluster_idx"].nunique()
+
+
 def get_VAE(config, adata):
-    adata.obs["cluster_idx"] = adata.obs[config.condition].astype("category").cat.codes
+    n_components = assign_cluster_idx(
+        adata,
+        conditions=config.conditions,
+        combo_categories=config.combo_categories,
+        condition=config.condition,
+    )
 
     MixturePriorSCVI.setup_anndata(adata, cluster_key="cluster_idx", layer="counts", batch_key=None)
 
     model = MixturePriorSCVI(
         adata,
-        n_components=adata.obs["cluster_idx"].nunique(),
+        n_components=n_components,
         n_latent=config.N_dim,
         trainable_means=config.trainable_means,
         trainable_sigma=config.trainable_sigma,
