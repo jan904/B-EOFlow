@@ -40,6 +40,7 @@ dependencies = [
     "scanpy>=1.11.5",
     "scgen>=2.1.0",
     "schedulefree>=1.4.1",
+    "seacells",
     "scib-metrics>=0.5.9",
     "scikit-misc>=0.5.2",
     "scvi-tools==1.3.2",
@@ -52,6 +53,9 @@ dependencies = [
 [tool.uv.sources]
 freia = { git = "https://github.com/vislearn/FrEIA.git" }
 scgen = { git = "https://github.com/theislab/scgen.git", branch = "master" }
+# PyPI release (0.3.3, Feb 2023) is source-only and predates Python 3.11 testing;
+# pinned to the git commit smoke-tested against this project's stack instead.
+seacells = { git = "https://github.com/dpeerlab/SEACells.git", rev = "a0a00d779ab5f51b9b005aeb251922fe6119f566" }
 
 [tool.black]
 line-length = 100
