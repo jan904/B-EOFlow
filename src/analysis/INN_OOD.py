@@ -7,7 +7,10 @@ import anndata as ad
 import matplotlib.pyplot as plt
 import torch
 
+from sklearn.metrics import roc_curve, auc
+
 from src.analysis.mmd import ctrl_mmd_dists, mmd_dists
+from src.analysis.logistic_regression import init_classifier, train_classifier
 
 
 def _combo_label(values, combo_order):
@@ -431,8 +434,126 @@ def cfs_fn_from_adata(adata_pred, source_label=None):
     return cfs_fn
 
 
+def _origin_auc(scoped_analyzer, x_real, x_other, num_epochs=10, n_repeats=3):
+    """Mean ROC AUC over `n_repeats` splits for telling `x_real` from `x_other`.
+
+    Same origin-classifier setup as `logistic_regression.evaluate_cf_roc` - label the two
+    sets "original"/"cfs", train on a split, score the held-out one - but on two arrays
+    handed in directly, so it works for a held-out combo where only the control cells were
+    transformed and the prediction has no row-for-row correspondence with `analyzer.adata`.
+
+    Repeated because the held-out combo has ~34 real cells: with `init_classifier`'s
+    test_size=0.2 a single split scores ~7 of them, and one draw of 7 is not an estimate.
+    """
+    import copy as _copy
+
+    n_real, n_other = len(x_real), len(x_other)
+    obs = pd.DataFrame(
+        {"origin": ["original"] * n_real + ["cfs"] * n_other},
+        index=[str(i) for i in range(n_real + n_other)],
+    )
+    combined = ad.AnnData(X=np.vstack([x_real, x_other]).astype(np.float32), obs=obs)
+
+    analyzer_cfs = _copy.copy(scoped_analyzer)
+    analyzer_cfs.adata = combined
+
+    weights = torch.tensor(
+        [1.0 / max(n_other, 1), 1.0 / max(n_real, 1)],
+        dtype=torch.float32,
+        device=scoped_analyzer.device,
+    )
+    weights = weights / weights.sum() * len(weights)
+
+    aucs = []
+    for _ in range(n_repeats):
+        classifier, train_loader, test_loader, train_dataset, _, _ = init_classifier(
+            analyzer_cfs, key="original", latent=False, hidden_dim=None, labels_key="origin"
+        )
+        train_classifier(
+            classifier, train_loader, test_loader, weights, scoped_analyzer.device,
+            num_epochs=num_epochs,
+        )
+
+        target_idx = train_dataset.cats[0].categories.tolist().index("original")
+        classifier.eval()
+        probs, labels = [], []
+        with torch.no_grad():
+            for x, y in test_loader:
+                probs.append(
+                    torch.softmax(classifier(x.to(scoped_analyzer.device)), dim=1).cpu().numpy()
+                )
+                labels.append(y[0].argmax(dim=1).cpu().numpy())
+        probs = np.concatenate(probs)[:, target_idx]
+        labels = np.concatenate(labels) == target_idx
+        if labels.min() == labels.max():  # a split with only one class scores nothing
+            continue
+        fpr, tpr, _ = roc_curve(labels, probs)
+        aucs.append(auc(fpr, tpr))
+
+    return float(np.mean(aucs)) if aucs else float("nan")
+
+
+def evaluate_leftout_combo_roc(
+    scoped_analyzer, predictions, key, control_label=None, num_epochs=10, n_repeats=3,
+    canonicalize=True,
+):
+    """Classifier two-sample test for the held-out combo: can a classifier tell each
+    model's counterfactuals from the real cells?
+
+    Complements `evaluate_leftout_combo_mmd`. MMD compares the two samples through a fixed
+    Gaussian kernel at a median bandwidth, which in 1937 dimensions is a smooth, isotropic
+    test; a learned discriminator instead seizes on whatever is structurally wrong - and
+    these counterfactuals are known to carry too little variance and too few exact zeros,
+    which is precisely the kind of difference a kernel smooths over and a classifier does
+    not.
+
+    AUC 0.5 = indistinguishable from real, 1.0 = trivially separable. Meaningless without
+    the two references returned alongside:
+      `floor`   - two halves of the real cells against each other. Above ~0.5 means the
+                  test is overfitting at this sample size and every model AUC is inflated.
+      `control` - what "do nothing" scores (real vs the untransformed control cells), so a
+                  model has to beat this, not the floor, to have done anything at all.
+
+    `canonicalize`: put every matrix in one space first (see `mmd._canonicalize`), so a
+    count-space model is not separated from log-space real cells on units alone.
+
+    Returns (results, floor, control_auc).
+    """
+    from src.analysis.mmd import _canonicalize
+
+    prep = _canonicalize if canonicalize else (lambda x: _as_array(x))
+
+    adata = scoped_analyzer.adata
+    x_real = prep(adata[adata.obs[scoped_analyzer.labels_key] == key])
+
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(len(x_real))
+    half = len(x_real) // 2
+    floor = _origin_auc(
+        scoped_analyzer, x_real[perm[:half]], x_real[perm[half:]], num_epochs, n_repeats
+    )
+
+    control_auc = None
+    control_label = control_label or getattr(scoped_analyzer, "control_label", None)
+    if control_label is not None:
+        x_ctrl = prep(adata[adata.obs[scoped_analyzer.labels_key] == control_label])
+        control_auc = _origin_auc(scoped_analyzer, x_real, x_ctrl, num_epochs, n_repeats)
+
+    results = {
+        name: _origin_auc(scoped_analyzer, x_real, prep(pred), num_epochs, n_repeats)
+        for name, pred in predictions.items()
+    }
+    return results, floor, control_auc
+
+
+def _as_array(x):
+    x = x.X if hasattr(x, "X") else x
+    return np.asarray(x.toarray() if hasattr(x, "toarray") else x, dtype=np.float32)
+
+
 def evaluate_leftout_combo_mmd(
-    scoped_analyzer, predictions, key, iter=10, ax=None, plot_dir=None, unbiased=False
+    scoped_analyzer, predictions, key, iter=10, ax=None, plot_dir=None, unbiased=False,
+    log1p_transform=False,
 ):
     """Bar chart of MMD between the real held-out-combo cells (found via
     `scoped_analyzer`, see `scoped_analyzer_for_combo`) and each named prediction AnnData
