@@ -103,7 +103,8 @@ def sample_leftout_combo_normal(
 
 
 def sample_leftout_combo_shift(
-    mean_shifter, adata, holdout_combo, condition_key, control_label, cell_type_key=None
+    mean_shifter, adata, holdout_combo, condition_key, control_label, cell_type_key=None,
+    clamp_min=0.0,
 ):
     """OOD sampling strategy 2: shift real control cells of the held-out combo's cell
     type directly by `mean_shifter.deltas_[target_treatment]` - no encode/decode, matching
@@ -120,4 +121,4 @@ def sample_leftout_combo_shift(
     shift = np.asarray(mean_shifter.deltas_[target_treatment]).reshape(-1)
     x_cf = x_control + shift
 
-    return _combo_adata(x_cf, holdout_combo, var=adata.var)
+    return _combo_adata(x_cf, holdout_combo, var=adata.var, clamp_min=clamp_min)

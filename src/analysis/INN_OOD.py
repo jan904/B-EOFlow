@@ -308,6 +308,7 @@ def sample_leftout_combo_shift(
     device=None,
     dtype=torch.float32,
     observed_combos=None,
+    clamp_min=0.0,
 ):
     """OOD sampling strategy 2: encode real control cells of the held-out combo's cell
     type, shift each one in latent space by the average treatment-control mean shift
@@ -390,7 +391,7 @@ def sample_leftout_combo_shift(
         z_cf = z_control + shift
         x_cf, _ = model(z_cf, rev=True)
 
-    return _combo_adata(x_cf, holdout_combo, var=adata.var)
+    return _combo_adata(x_cf, holdout_combo, var=adata.var, clamp_min=clamp_min)
 
 
 def scoped_analyzer_for_combo(analyzer, holdout_combo, conditions, condition_key, cell_type_key=None):

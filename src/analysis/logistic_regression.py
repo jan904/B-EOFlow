@@ -622,7 +622,8 @@ def evaluate_cfs_classification(
     return x_cfs, z_cfs, all_source_labels, target_idx
 
 
-def evaluate_cf_roc(analyzer, key, cf_fn=generate_counterfactuals, num_epochs=10, ax=None):
+def evaluate_cf_roc(analyzer, key, cf_fn=generate_counterfactuals, num_epochs=10, ax=None,
+                    clamp_min=0.0):
     """Trains a classifier to distinguish real `key` cells ("original") from
     counterfactuals produced by cf_fn ("cfs"), then reports the ROC curve for
     recognizing real cells from a held-out split - the same origin-classifier
@@ -630,6 +631,19 @@ def evaluate_cf_roc(analyzer, key, cf_fn=generate_counterfactuals, num_epochs=10
     train classifier -> ROC), factored out for reuse across models.
     """
     x_cfs, z_cfs, all_source_labels, _ = cf_fn(analyzer, key=key)
+
+    # `clamp_min`: floor the decoded expression, as every other consumer of these
+    # counterfactuals already does (INN_OOD._combo_adata for the OOD samplers,
+    # plot_top_deg_violin for its violins, scGen for its own samples). The decoder is
+    # unconstrained and ~32% of its entries come out negative, which real cells never are,
+    # so without this the classifier is scored on a version of the predictions no other
+    # metric ever sees - and the negatives measurably change the answer: on a matched test,
+    # AUC 0.971 with them intact against 0.997 once floored, because a *linear* classifier
+    # cannot form a "value is negative" feature and the negatives only blur the real signal.
+    # Pass None to score the raw decoder output (see cf_expressions.negativity_table for
+    # quantifying it instead).
+    if clamp_min is not None:
+        x_cfs = torch.clamp(x_cfs, min=clamp_min)
 
     adata_real = analyzer.adata[analyzer.adata.obs[analyzer.labels_key] == key].copy()
     adata_real.obs["origin"] = "original"
