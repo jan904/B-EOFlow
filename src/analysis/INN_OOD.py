@@ -446,9 +446,24 @@ def evaluate_leftout_combo_mmd(
     compares against the full sample, and the biased estimator's default sample-size
     artifact is largest exactly at small n.
 
+    log1p_transform: normalize+log1p both the real cells and the predictions before the
+    MMD, i.e. the same flag `mmd_dists`/`ctrl_mmd_dists` already take - set it whenever
+    the model's `.adata` is not already log-space (scVI, scGen). It used not to be
+    forwarded at all, so a model whose real cells are raw counts while its predictions
+    come out normalized had the two sides compared *across* representations. That is not
+    a mild bias: measured on real metacells, a like-for-like comparison scores ~0.04
+    within one space and ~0.60 across spaces - which is precisely the range scVI's bar
+    was reaching, and it swamped any real difference in prediction quality. The kernel
+    bandwidth itself is not the problem (both helpers take a median heuristic from the
+    real side, so a pure rescaling of the counts barely moves the result); having the
+    two point clouds in different representations is.
+
     Returns {name: global_mmd} and the control MMD.
     """
-    ctrl_mmd = ctrl_mmd_dists(scoped_analyzer, key=key, iter=iter, unbiased=unbiased)
+    ctrl_mmd = ctrl_mmd_dists(
+        scoped_analyzer, key=key, iter=iter, unbiased=unbiased,
+        log1p_transform=log1p_transform,
+    )
 
     results = {}
     for name, adata_pred in predictions.items():
@@ -457,6 +472,7 @@ def evaluate_leftout_combo_mmd(
             key=key,
             cf_fn=cfs_fn_from_adata(adata_pred, source_label=name),
             unbiased=unbiased,
+            log1p_transform=log1p_transform,
         )
         results[name] = global_mmd
 
