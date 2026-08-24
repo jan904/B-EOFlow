@@ -19,6 +19,9 @@ from src.model.INN.INN_losses import (
 )
 from src.utils.logger import get_logger
 
+# imported lazily-safe: analysis imports model code, so keep this after the model imports
+from src.analysis.ood_probe import format_probe
+
 
 def train_INN(
     model,
@@ -37,7 +40,15 @@ def train_INN(
     conditions=None,
     use_counts=False,
     save_on_validation=False,
+    ood_probe=None,
+    ood_probe_every=50,
 ):
+    """`ood_probe`: an analysis.ood_probe.OODProbe for a *validation* combo held out
+    alongside the reported test combo. Scored every `ood_probe_every` epochs and logged;
+    the best-MMD state is written next to `save_model_path` as `*_best_ood.pt`, in
+    addition to (not instead of) the usual checkpoint - the NLL keeps improving long
+    after OOD prediction stops, so the last checkpoint is not the one you want for OOD,
+    and both endpoints are worth keeping."""
 
     condition_type = model_config.condition_type
     train_means = model_config.trainable_means
@@ -85,6 +96,10 @@ def train_INN(
     best_val_loss = float("inf")
     batch_val_losses = []
     mean_val_loss = float("inf")
+
+    best_ood_mmd = float("inf")
+    ood_history = []
+    best_ood_path = save_model_path.replace(".pt", "_best_ood.pt")
 
     print(f"Sigma noise: {kwargs_loss['sigma_noise']}")
     sigma_noise = kwargs_loss["sigma_noise"]
@@ -313,6 +328,40 @@ def train_INN(
 
         if condition_type == "mixture" and train_means == False:
             update_means_epoch(model, train_dataloader, device, momentum=1.0)
+
+        if ood_probe is not None and epoch % ood_probe_every == 0:
+            # schedule-free keeps the parameters at the train (y) iterate; the weights a
+            # later `load` would see are the x iterate, so probing without this swap
+            # scores a different model than the one being selected.
+            schedule_free = hasattr(optimizer, "eval") and hasattr(optimizer, "train")
+            if schedule_free:
+                optimizer.eval()
+            ood_metrics = ood_probe(model)
+            if schedule_free:
+                optimizer.train()
+
+            ood_metrics["epoch"] = epoch
+            ood_metrics["combo"] = ood_probe.label
+            ood_history.append(ood_metrics)
+            logger.info(format_probe(ood_metrics))
+
+            if ood_metrics["mmd"] < best_ood_mmd:
+                best_ood_mmd = ood_metrics["mmd"]
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "ood_metrics": ood_metrics,
+                        "ood_history": ood_history,
+                        "log_path": log_path,
+                        "counts": use_counts,
+                        "conditions": conditions,
+                        "model_config": asdict(model_config),
+                    },
+                    best_ood_path,
+                )
+                logger.info(f"New best OOD MMD ({best_ood_mmd:.4f}); saved {best_ood_path}")
 
         if save_on_validation and test_dataloader is not None:
             if mean_val_loss < best_val_loss:

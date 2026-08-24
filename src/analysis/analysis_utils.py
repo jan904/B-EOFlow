@@ -627,7 +627,7 @@ def get_model_from_checkpoint(
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
     print(f"Checkpoint found at epoch {checkpoint['epoch']}.")
-    metrics_loss = checkpoint["metrics_loss"]
+    metrics_loss = checkpoint["metrics_loss"] if "metrics_loss" in checkpoint else None
     val_metrics_loss = checkpoint["val_metrics_loss"] if "val_metrics_loss" in checkpoint else None
 
     return model, optimizer, metrics_loss, val_metrics_loss, model_config

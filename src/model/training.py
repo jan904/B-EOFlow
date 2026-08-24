@@ -18,6 +18,8 @@ def train_model(
     conditions=None,
     use_counts=False,
     save_on_validation=False,
+    ood_probe=None,
+    ood_probe_every=50,
 ):
 
     if model_config.model_type == "inn":
@@ -38,6 +40,8 @@ def train_model(
             conditions=conditions,
             use_counts=use_counts,
             save_on_validation=save_on_validation,
+            ood_probe=ood_probe,
+            ood_probe_every=ood_probe_every,
         )
     elif model_config.model_type == "vae":
         pass
@@ -60,4 +64,6 @@ def train_model(
             conditions=conditions,
             use_counts=use_counts,
             save_on_validation=save_on_validation,
+            ood_probe=ood_probe,
+            ood_probe_every=ood_probe_every,
         )

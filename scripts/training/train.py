@@ -48,6 +48,17 @@ def parse_args():
         "for leave-one-combo-out OOD evaluation (e.g. cytokine=IL-2 'cell_type=CD8 T cells'). "
         "Requires --use_metacells.",
     )
+    parser.add_argument(
+        "--probe_combo",
+        nargs="+",
+        default=None,
+        help="obs column=value pairs for a SECOND combo, held out of training and scored "
+        "every --ood_probe_every epochs (MMD / R2 / dispersion / nearest-mean accuracy) "
+        "so checkpoints can be selected on OOD quality instead of likelihood. Keep it "
+        "distinct from --holdout_combo: selecting on a combo makes it a validation set. "
+        "Requires --use_metacells.",
+    )
+    parser.add_argument("--ood_probe_every", type=int, default=50)
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.0)
     parser.add_argument("--condition_type", type=str, default=None, choices=["mixture", "normal"])
@@ -124,14 +135,31 @@ def main():
     if args.conditions is not None:
         condition_categories, combo_categories = get_condition_vocab(adata, args.conditions)
 
+    # The OOD probe's combo has to leave the training set as well, otherwise it is not
+    # out-of-distribution and the curve it produces means nothing. It is kept separate
+    # from --holdout_combo on purpose: selecting a checkpoint on a combo turns that combo
+    # into a validation set, so the reported test combo must be one nothing selects on.
+    probe_combo = _parse_holdout_combo(args.probe_combo) if args.probe_combo else None
+    if probe_combo is not None and not args.use_metacells:
+        raise ValueError("--probe_combo requires --use_metacells.")
+    probe_adata = adata if probe_combo is not None else None
+
     if args.use_metacells and args.holdout_combo is not None:
         holdout_combo = _parse_holdout_combo(args.holdout_combo)
-        adata, _ = split_holdout_combinations(
-            adata, [holdout_combo], group_keys=metacell_group_keys
-        )
+        to_hold = [holdout_combo]
+        if probe_combo is not None:
+            to_hold.append(probe_combo)
+        adata, _ = split_holdout_combinations(adata, to_hold, group_keys=metacell_group_keys)
         print(
             f"Held out combo {holdout_combo}; training on the remaining {adata.n_obs} metacells."
         )
+        if probe_combo is not None:
+            print(f"  plus the probe combo {probe_combo}")
+    elif probe_combo is not None:
+        adata, _ = split_holdout_combinations(
+            adata, [probe_combo], group_keys=metacell_group_keys
+        )
+        print(f"Held out probe combo {probe_combo}; {adata.n_obs} metacells remain.")
 
     dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
         adata,
@@ -356,6 +384,23 @@ def main():
         print(model_config)
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
+    ood_probe = None
+    if probe_combo is not None:
+        from src.analysis.ood_probe import OODProbe
+
+        ood_probe = OODProbe(
+            probe_adata,            # pre-holdout: it still contains the probe combo's cells
+            probe_combo,
+            combo_categories,
+            args.conditions,
+            control_label,
+            device=device,
+        )
+        print(
+            f"OOD probe on {ood_probe.label} ({ood_probe.n_real} real metacells), "
+            f"every {args.ood_probe_every} epochs."
+        )
+
     model, optimizer, metrics_loss, val_metrics_loss, log_path = train_model(
         model,
         optimizer,
@@ -373,6 +418,8 @@ def main():
         conditions=args.conditions,
         use_counts=args.use_counts,
         save_on_validation=args.validation,
+        ood_probe=ood_probe,
+        ood_probe_every=args.ood_probe_every,
     )
 
 
