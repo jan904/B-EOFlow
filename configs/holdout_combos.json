@@ -1,0 +1,42 @@
+{
+  "combo_1": {
+    "cytokine": "IL-2",
+    "cell_type": "CD8 Memory"
+  },
+  "combo_2": {
+    "cytokine": "CD27L",
+    "cell_type": "NK"
+  },
+  "combo_3": {
+    "cytokine": "CD40L",
+    "cell_type": "CD14 Mono"
+  },
+  "combo_4": {
+    "cytokine": "CT-1",
+    "cell_type": "cDC"
+  },
+  "combo_5": {
+    "cytokine": "FGF-beta",
+    "cell_type": "CD4 Naive"
+  },
+  "combo_6": {
+    "cytokine": "IFN-epsilon",
+    "cell_type": "MAIT"
+  },
+  "combo_7": {
+    "cytokine": "IL-1-beta",
+    "cell_type": "CD16 Mono"
+  },
+  "combo_8": {
+    "cytokine": "IL-13",
+    "cell_type": "CD4 Memory"
+  },
+  "combo_9": {
+    "cytokine": "IL-32-beta",
+    "cell_type": "CD14 Mono"
+  },
+  "combo_10": {
+    "cytokine": "IL-4",
+    "cell_type": "NK"
+  }
+}

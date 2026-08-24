@@ -1,3 +1,4 @@
+import json
 import os
 import numpy as np
 import torch
@@ -49,6 +50,23 @@ def parse_args():
         "Requires --use_metacells.",
     )
     parser.add_argument(
+        "--holdout_file",
+        type=str,
+        default=None,
+        help="JSON file mapping a name to a combo, e.g. {\"combo_1\": {\"cytokine\": \"IL-2\", "
+        "\"cell_type\": \"CD8 Memory\"}, ...}. Every combo in it is held out of training, so "
+        "evaluation gets several OOD combos instead of one - see configs/holdout_combos.json. "
+        "Mutually exclusive with --holdout_combo. Requires --use_metacells.",
+    )
+    parser.add_argument(
+        "--holdout_name",
+        type=str,
+        default=None,
+        help="short name for the holdout SET, used in the checkpoint and results paths "
+        "(the per-combo names from the file would be far too long). Defaults to the file's "
+        "basename, e.g. holdout_combos.json -> '_holdout_combos'.",
+    )
+    parser.add_argument(
         "--probe_combo",
         nargs="+",
         default=None,
@@ -86,6 +104,25 @@ def parse_args():
     parser.add_argument("--balance_classes", action="store_true")
 
     return parser.parse_args()
+
+
+def _load_holdout_file(path, conditions):
+    """{name: {condition: value}} from JSON, validated against `conditions`.
+
+    Names are kept (combo_1, combo_2, ...) rather than derived from the combo itself: they
+    are short enough for paths and figure labels, and they stay stable if the underlying
+    combo is ever swapped, so results from different runs remain comparable by name.
+    """
+    with open(path) as handle:
+        combos = json.load(handle)
+    if not isinstance(combos, dict) or not combos:
+        raise ValueError(f"{path} must be a non-empty object mapping name -> combo.")
+    for name, combo in combos.items():
+        if set(combo) != set(conditions):
+            raise ValueError(
+                f"{path}: '{name}' has keys {sorted(combo)}, expected {sorted(conditions)}."
+            )
+    return combos
 
 
 def _parse_holdout_combo(tokens):
@@ -144,17 +181,33 @@ def main():
         raise ValueError("--probe_combo requires --use_metacells.")
     probe_adata = adata if probe_combo is not None else None
 
-    if args.use_metacells and args.holdout_combo is not None:
-        holdout_combo = _parse_holdout_combo(args.holdout_combo)
-        to_hold = [holdout_combo]
+    if args.holdout_file is not None:
+        if args.holdout_combo is not None:
+            raise ValueError("Pass either --holdout_file or --holdout_combo, not both.")
+        if not args.use_metacells:
+            raise ValueError("--holdout_file requires --use_metacells.")
+
+    holdout_combos = {}
+    if args.holdout_file is not None:
+        holdout_combos = _load_holdout_file(args.holdout_file, args.conditions)
+    elif args.use_metacells and args.holdout_combo is not None:
+        holdout_combos = {"combo_1": _parse_holdout_combo(args.holdout_combo)}
+
+    if holdout_combos:
+        # every named combo leaves training, plus the probe's if there is one. Holding out
+        # several rather than one is what makes the OOD numbers interpretable: a single
+        # combo gives one value with no error bar, and the ones we have used carry ~34 real
+        # metacells, where a noise floor is nearly as large as the effect being measured.
+        holdout_combo = next(iter(holdout_combos.values()))   # kept for downstream config
+        to_hold = list(holdout_combos.values())
         if probe_combo is not None:
             to_hold.append(probe_combo)
         adata, _ = split_holdout_combinations(adata, to_hold, group_keys=metacell_group_keys)
-        print(
-            f"Held out combo {holdout_combo}; training on the remaining {adata.n_obs} metacells."
-        )
+        listed = ", ".join(f"{k}={v}" for k, v in holdout_combos.items())
+        print(f"Held out {len(holdout_combos)} combo(s): {listed}")
         if probe_combo is not None:
             print(f"  plus the probe combo {probe_combo}")
+        print(f"Training on the remaining {adata.n_obs} metacells.")
     elif probe_combo is not None:
         adata, _ = split_holdout_combinations(
             adata, [probe_combo], group_keys=metacell_group_keys
@@ -214,9 +267,22 @@ def main():
         output_dir_path += "_metacells"
 
         if holdout_combo is not None:
-            combo_str = "_".join(f"{k}-{_sanitize(v)}" for k, v in holdout_combo.items())
-            model_path += f"_holdout_{combo_str}"
-            output_dir_path += f"_holdout_{combo_str}"
+            # One path component for the holdout SET. With several combos the old
+            # per-combo string ("_holdout_cytokine-IL-2_cell_type-CD8-Memory") would be
+            # unusable, so a set name is used instead; a single combo keeps the old
+            # spelling so existing checkpoints still resolve.
+            if args.holdout_file is not None:
+                stem = os.path.splitext(os.path.basename(args.holdout_file))[0]
+                # "holdout_combos.json" -> "combos", so the path reads
+                # "_holdout_combos" rather than "_holdout_holdout_combos"
+                stem = stem[len("holdout_") :] if stem.startswith("holdout_") else stem
+                set_name = args.holdout_name or _sanitize(stem)
+                suffix = f"_holdout_{set_name}"
+            else:
+                combo_str = "_".join(f"{k}-{_sanitize(v)}" for k, v in holdout_combo.items())
+                suffix = f"_holdout_{combo_str}"
+            model_path += suffix
+            output_dir_path += suffix
     else:
         # If use_counts is True, append "_counts" to model name and output dir name
         if args.use_counts:
@@ -366,7 +432,7 @@ def main():
             trainable_sigma=args.train_sigma,
             lr_sigma=args.lr_sigma,
             balance_classes=args.balance_classes,
-            holdout_combos=[holdout_combo] if holdout_combo is not None else None,
+            holdout_combos=list(holdout_combos.values()) or None,
             combo_categories=combo_categories,
             condition_categories=condition_categories,
             conditions=args.conditions,
