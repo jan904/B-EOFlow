@@ -440,8 +440,19 @@ def append_losses(losses, epoch, metrics, loss):
     losses["z2"] = np.append(losses["z2"], metrics["z2"].mean().cpu().detach().numpy())
     losses["NLL"] = np.append(losses["NLL"], metrics["NLL"].cpu().detach().numpy())
     losses["MTC"] = np.append(losses["MTC"], metrics["MTC"].cpu().detach().numpy())
-    # H_i is a vector not scalar
-    losses["H_i"] = np.append(losses["H_i"], metrics["H_i"].cpu().detach().numpy())
+    # H_i is a vector (one entry per dimension), not a scalar: keep only the latest one
+    # rather than appending it. The training loop reads it back as `losses["H_i"][-N_dim:]`
+    # to seed the next step's per-dimension entropy estimate, so storing just the most
+    # recent vector is equivalent to appending and slicing - while keeping the array at
+    # N_dim floats instead of growing by N_dim every batch (~200 KB/epoch, which is what
+    # pushed checkpoints into the GBs).
+    #
+    # Dropping the assignment altogether leaves the array empty, and `len(losses["H_i"])
+    # < N_dim` then sends INN_training down its "initialize with infinite values" branch
+    # on *every* step: `torch.zeros(N_dim) * torch.inf` is all-NaN, which trips the isnan
+    # guard in get_loss and reports MTC as exactly 0.0 for the whole run - a dead metric
+    # that reads like the regularizer having driven total correlation to zero.
+    losses["H_i"] = metrics["H_i"].cpu().detach().numpy()
     losses["H_core"] = np.append(losses["H_core"], metrics["H_core"].cpu().detach().numpy())
     losses["H_detail"] = np.append(losses["H_detail"], metrics["H_detail"].cpu().detach().numpy())
     losses["MI_core_detail"] = np.append(
