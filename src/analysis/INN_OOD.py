@@ -341,8 +341,9 @@ def sample_leftout_combo_shift(
         #
         # Written as a difference of means rather than by reading the treatment
         # embedding directly: it needs no gauge to be pinned, and it stays correct
-        # unchanged if the prior later gains a cell-type-specific interaction term
-        # (where a single treatment vector would no longer be well defined).
+        # unchanged under a cell-type-specific interaction term - which is now a real
+        # case (`treatment_gain`: mu = a_ct + w_ct * b_cy), where the shift is
+        # `w_ct * b_cy` and no single treatment vector serves every cell type.
         target_label = _combo_label(holdout_combo, combo_order)
         control_label_combo = _combo_label(
             {**holdout_combo, condition_key: control_label}, combo_order

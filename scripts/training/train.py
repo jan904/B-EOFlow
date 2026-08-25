@@ -94,6 +94,9 @@ def parse_args():
     parser.add_argument("--means_seperation", type=float, default=None)
     # Factorized mixture prior: mu(combo) = sum of per-condition level embeddings
     parser.add_argument("--factorize_means", action="store_true")
+    # mu = a_cell_type + w_cell_type * b_cytokine instead of a + b: one learned scalar per
+    # cell type on the treatment embedding. Needs --factorize_means and --control_condition.
+    parser.add_argument("--treatment_gain", action="store_true")
     parser.add_argument("--means_dim", type=int, default=None)
     # which condition is the treatment axis (its control level is the dataset's own
     # control_label); required for --factorize_means to expose a treatment shift
@@ -317,6 +320,13 @@ def main():
         model_path += "_factorized"
         output_dir_path += "_factorized"
 
+    # Same reasoning one level down: a gain checkpoint and an additive one differ by a
+    # parameter, so they must not share a path (loading one into the other is refused in
+    # remap_keys, which would abort a resume rather than silently continue).
+    if args.treatment_gain:
+        model_path += "_gain"
+        output_dir_path += "_gain"
+
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
     os.makedirs(model_path, exist_ok=True)
@@ -410,6 +420,12 @@ def main():
             and args.latent_per_condition is None
         ), "latent_per_condition must be specified when supervise_latent_meaning is 'partition' or 'both'."
 
+        if args.treatment_gain and not (args.factorize_means and args.control_condition):
+            raise SystemExit(
+                "--treatment_gain needs --factorize_means and --control_condition: it scales "
+                "the factorized prior's treatment embedding, relative to the pinned control."
+            )
+
         model_config = ModelConfig(
             N_dim=N_dim,
             condition_shapes=condition_shapes,
@@ -437,6 +453,7 @@ def main():
             condition_categories=condition_categories,
             conditions=args.conditions,
             factorize_means=args.factorize_means,
+            treatment_gain=args.treatment_gain,
             means_dim=args.means_dim,
             control_condition=args.control_condition,
             # control_label comes from load_data/load_metacells, so the pinned level is

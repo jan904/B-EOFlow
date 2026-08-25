@@ -176,6 +176,20 @@ def prior_geometry(model, config, combo_categories, conditions, trained_mask):
     ss_tot = ((means[idx] - means[idx].mean(0)) ** 2).sum()
     additive_r2 = float(1 - (resid**2).sum() / ss_tot) if ss_tot > 0 else float("nan")
 
+    # Learned per-cell-type gains, when the prior has them. Reported per level (not just
+    # summarized) because the interesting question is *which* cell types the model decided
+    # respond weakly - a gain near 0 says "this cell type barely moves", and one far above
+    # 1 says the shared shift is too small for it.
+    gain = getattr(model, "treatment_gain", None)
+    gains = None
+    if gain is not None:
+        w = gain.detach().cpu().numpy()
+        gain_key = conditions[model.gain_factor]
+        gains = {
+            str(level): float(value)
+            for level, value in zip(list(config.condition_categories[gain_key]), w)
+        }
+
     return {
         "factorized": bool(getattr(model, "factorized", False)),
         "n_components": int(n_components),
@@ -188,6 +202,7 @@ def prior_geometry(model, config, combo_categories, conditions, trained_mask):
         "pairwise_min_trained": float(sub[off].min()),
         "pairwise_median_trained": float(np.median(sub[off])),
         "additive_r2": additive_r2,
+        "treatment_gain": gains,
     }
 
 
@@ -403,6 +418,7 @@ def evaluate(path, args, adata, device, rng):
     print(f"  epoch {checkpoint['epoch']} | sigma_noise {settings.get('sigma_noise')} | "
           f"lam_MTC {settings.get('lam_MTC')} | "
           f"factorize_means {getattr(config, 'factorize_means', None)} | "
+          f"treatment_gain {getattr(config, 'treatment_gain', None)} | "
           f"holdouts {len(named)}: {', '.join(holdout_labels.values())}")
 
     # combos with training rows, as labels - free-means OOD needs this to avoid averaging
@@ -425,6 +441,17 @@ def evaluate(path, args, adata, device, rng):
           f"median {geo['pairwise_median_trained']:.2f} | additive R2 {geo['additive_r2']:.3f} "
           f"| shift consistency {geo['shift_consistency_mean']:.3f}")
 
+    if geo["treatment_gain"]:
+        w = geo["treatment_gain"]
+        ranked = sorted(w.items(), key=lambda kv: kv[1])
+        weak = ", ".join(f"{k} {v:.2f}" for k, v in ranked[:3])
+        strong = ", ".join(f"{k} {v:.2f}" for k, v in ranked[-3:][::-1])
+        values = np.array(list(w.values()))
+        # All gains staying at 1.00 means the gain bought nothing and the prior is still
+        # the additive one; spread is the whole point of the parameterization.
+        print(f"          gain w: median {np.median(values):.2f} sd {values.std():.2f} | "
+              f"weakest {weak} | strongest {strong}")
+
     X = torch.tensor(adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X),
                      dtype=torch.float32)
     Z = encode(model, X, device, args.batch_size)
@@ -442,6 +469,7 @@ def evaluate(path, args, adata, device, rng):
     results = {"checkpoint": path, "epoch": int(checkpoint["epoch"]),
                "sigma_noise": settings.get("sigma_noise"), "lam_MTC": settings.get("lam_MTC"),
                "factorize_means": getattr(config, "factorize_means", None),
+               "treatment_gain": getattr(config, "treatment_gain", None),
                "prior": geo, "shift_consistency": shifts, "latent": fit, "counterfactuals": []}
 
     targets = [(name, combo) for name, combo in named.items()]

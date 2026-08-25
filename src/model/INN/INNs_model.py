@@ -87,6 +87,7 @@ class ModelWithMixturePrior(nn.Module):
         condition_shapes=None,
         control_factor=None,
         control_level=None,
+        treatment_gain=False,
     ):
         """`combo_index` (with `condition_shapes`) switches the mixture prior from one
         free mean per combo to a **factorized** one:
@@ -115,6 +116,26 @@ class ModelWithMixturePrior(nn.Module):
         `latent_per_condition * n_components`, which needlessly grows with the number of
         combos; factorized only needs room for `sum(condition_shapes)` mutually
         orthogonal level vectors.
+
+        `treatment_gain` relaxes the strict additivity to
+
+            mu(cell_type, cytokine) = a_cell_type + w_cell_type * b_cytokine
+
+        with one learned scalar `w` per level of the *non*-treatment factor. The
+        treatment still has a single direction shared across cell types - so a held-out
+        combo is still composed rather than guessed, `w` being fitted from every other
+        cytokine that cell type saw and `b` from every other cell type that cytokine saw -
+        but a cell type may now respond more or less strongly to it. It is a rank-1
+        interaction: it rescales the shift, it cannot rotate it.
+
+        Two things to know about the parameterization. The gauge above is what keeps `w`
+        meaningful: with the control level pinned, `mu = a + w*(b - b_ctrl)` still equals
+        `a_cell_type` at control whatever `w` is, so `a` stays the control mean and `w`
+        reads as a response amplitude relative to the average cell type - which is why
+        `control_factor`/`control_level` are required here. And `w * b` keeps one global
+        scale redundancy (scale every `w` by c, every `b` by 1/c), a flat direction that
+        leaves every `mu` untouched; it costs nothing during training but means the
+        magnitude of a single `w` is only interpretable against the other `w`s.
         """
         super().__init__()
         self.model = model
@@ -140,9 +161,7 @@ class ModelWithMixturePrior(nn.Module):
                 self.means_dim = 2 * int(sum(condition_shapes))
 
             if self.means_dim > N_dim:
-                raise ValueError(
-                    f"means_dim ({self.means_dim}) cannot exceed N_dim ({N_dim})."
-                )
+                raise ValueError(f"means_dim ({self.means_dim}) cannot exceed N_dim ({N_dim}).")
 
             # learnable part: (n_components, means_dim)
             #
@@ -230,6 +249,36 @@ class ModelWithMixturePrior(nn.Module):
                 self.factor_emb = None
                 self.combo_index = None
 
+            # per-cell-type gain on the treatment embedding (see the class docstring).
+            # Initialized at 1, i.e. exactly the additive prior, so a run with the gain
+            # enabled starts from the model a purely additive run would have and any
+            # departure from additivity has to be earned by the likelihood.
+            self.treatment_gain = None
+            self.gain_factor = None
+            if treatment_gain:
+                if not self.factorized:
+                    raise ValueError(
+                        "treatment_gain only applies to a factorized prior - there is no "
+                        "treatment embedding to scale when every combo has a free mean."
+                    )
+                if len(condition_shapes) != 2:
+                    raise ValueError(
+                        f"treatment_gain is defined for exactly two factors (the treatment "
+                        f"and the one the gain is indexed by), got {len(condition_shapes)}. "
+                        "With more factors it is ambiguous which one w should depend on."
+                    )
+                if control_factor is None or control_level is None:
+                    raise ValueError(
+                        "treatment_gain needs control_factor and control_level: without the "
+                        "gauge pinned, scaling one factor's embedding also rescales an "
+                        "arbitrary offset, and w stops meaning 'response amplitude'. Pass "
+                        "control_condition/control_label on the config."
+                    )
+                self.gain_factor = 1 - int(control_factor)
+                self.treatment_gain = nn.Parameter(
+                    torch.ones(condition_shapes[self.gain_factor]), requires_grad=True
+                )
+
             self.log_sigma = None
             if trainable_sigma:
                 log_sigma = torch.full(
@@ -257,6 +306,8 @@ class ModelWithMixturePrior(nn.Module):
             self.means_seperation = None
             self.control_factor = None
             self.control_level = None
+            self.treatment_gain = None
+            self.gain_factor = None
 
     def _effective_factor(self, i):
         """Factor `i`'s level embeddings with the gauge applied.
@@ -283,12 +334,18 @@ class ModelWithMixturePrior(nn.Module):
         the `means` property, the OOD samplers - indexes means by combo id regardless of
         how they are parameterized.
         """
-        if self.factorized:
-            return sum(
-                self._effective_factor(i)[self.combo_index[:, i]]
-                for i in range(len(self.factor_emb))
-            )
-        return self.means_free
+        if not self.factorized:
+            return self.means_free
+
+        rows = []
+        for i in range(len(self.factor_emb)):
+            emb = self._effective_factor(i)[self.combo_index[:, i]]
+            if self.treatment_gain is not None and i == self.control_factor:
+                # w indexed by the *other* factor's level, so each cell type scales the
+                # one shared treatment direction by its own amount.
+                emb = self.treatment_gain[self.combo_index[:, self.gain_factor]].unsqueeze(1) * emb
+            rows.append(emb)
+        return sum(rows)
 
     @property
     def means(self):
@@ -301,16 +358,22 @@ class ModelWithMixturePrior(nn.Module):
     def prior_parameters(self):
         """Mixture-prior parameters (factors or free means), for their own lr group."""
         if self.factorized:
-            return list(self.factor_emb.parameters())
+            params = list(self.factor_emb.parameters())
+            if self.treatment_gain is not None:
+                params.append(self.treatment_gain)
+            return params
         return [] if self.means_free is None else [self.means_free]
 
     def prior_parameter_names(self):
         """State-dict names of `prior_parameters`, to exclude them from the base group."""
         if self.factorized:
-            return {f"factor_emb.{i}" for i in range(len(self.factor_emb))}
+            names = {f"factor_emb.{i}" for i in range(len(self.factor_emb))}
+            if self.treatment_gain is not None:
+                names.add("treatment_gain")
+            return names
         return {"means_free"}
 
-    def treatment_shift(self, level, factor=None):
+    def treatment_shift(self, level, factor=None, gain_level=None):
         """Latent translation from the pinned control level to `level`, as a full N_dim
         vector (zero-padded outside the condition block) ready to add to a latent code.
 
@@ -320,6 +383,10 @@ class ModelWithMixturePrior(nn.Module):
         they did not. Here the shift is a single parameter fitted jointly from every cell
         type that saw this treatment, so there is nothing to average and nothing to
         estimate, including for a combo held out of training.
+
+        With `treatment_gain` the shift is `w_gain_level * b_level`, so it is no longer
+        the same vector for every cell type and `gain_level` (the level index of the
+        non-treatment factor) becomes required.
         """
         if not self.factorized:
             raise RuntimeError(
@@ -331,6 +398,21 @@ class ModelWithMixturePrior(nn.Module):
             raise ValueError("No control_factor is set - pass `factor` explicitly.")
 
         b = self._effective_factor(factor)[level]
+
+        if self.treatment_gain is not None:
+            if factor != self.control_factor:
+                raise ValueError(
+                    f"With treatment_gain, only factor {self.control_factor} (the treatment "
+                    f"axis) acts by translation; moving along factor {factor} also changes "
+                    "the gain, so there is no single shift vector for it."
+                )
+            if gain_level is None:
+                raise ValueError(
+                    "treatment_gain is enabled, so the shift depends on the cell type: pass "
+                    f"`gain_level`, the level index into factor {self.gain_factor}."
+                )
+            b = self.treatment_gain[gain_level] * b
+
         out = torch.zeros(self.N_dim, device=b.device, dtype=b.dtype)
         out[: self.means_dim] = b
         return out
@@ -613,6 +695,15 @@ def get_INN(config):
     factor_shapes = None
     control_factor = None
     control_level = None
+    treatment_gain = bool(getattr(config, "treatment_gain", False))
+
+    if treatment_gain and not (
+        config.condition_type == "mixture" and getattr(config, "factorize_means", False)
+    ):
+        raise ValueError(
+            "treatment_gain requires condition_type='mixture' with factorize_means=True - "
+            "it scales the factorized prior's treatment embedding."
+        )
 
     if config.condition_type == "mixture" and getattr(config, "factorize_means", False):
         if config.combo_categories is None or config.condition_categories is None:
@@ -669,6 +760,7 @@ def get_INN(config):
         condition_shapes=factor_shapes,
         control_factor=control_factor,
         control_level=control_level,
+        treatment_gain=treatment_gain,
     )
 
     return model

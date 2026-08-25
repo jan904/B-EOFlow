@@ -76,6 +76,12 @@ class INNConfig(BaseModelConfig):
     # ModelWithMixturePrior._effective_factor). Only used when factorize_means.
     control_condition: str = None
     control_label: str = None
+    # Relax strict additivity to mu(combo) = a_cell_type + w_cell_type * b_cytokine, with
+    # one learned scalar per cell type. Still composes a held-out combo from factors
+    # fitted elsewhere (w from that cell type's other cytokines, b from that cytokine's
+    # other cell types), so it keeps the OOD property; it only lets response *magnitude*
+    # vary by cell type. Requires factorize_means and control_condition/control_label.
+    treatment_gain: bool = False
 
     N_blocks: int = 12
     subnet_fc: callable = None

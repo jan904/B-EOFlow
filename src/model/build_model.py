@@ -153,7 +153,20 @@ def remap_keys(model, state_dict):
             "Rebuild the model with factorize_means=True."
         )
 
-    non_prior_missing = [k for k in missing if not k.startswith(("means", "factor_emb"))]
+    # A gain checkpoint loaded into a plain additive model would land in `unexpected` and
+    # be dropped silently, giving a *different* prior (every w reset to 1) under the same
+    # filename. The other direction is fine and deliberately allowed: `treatment_gain`
+    # initializes at 1, so a purely additive checkpoint loads into a gain model as exactly
+    # the model it already was, which is how a gain run warm-starts from an additive one.
+    if "treatment_gain" in unexpected and getattr(model, "treatment_gain", None) is None:
+        raise RuntimeError(
+            "Checkpoint carries a learned treatment_gain but the model has none - its "
+            "means would silently differ. Rebuild the model with treatment_gain=True."
+        )
+
+    non_prior_missing = [
+        k for k in missing if not k.startswith(("means", "factor_emb", "treatment_gain"))
+    ]
 
     if non_prior_missing:
         print(f"WARNING: missing keys after remapping: {non_prior_missing}")
