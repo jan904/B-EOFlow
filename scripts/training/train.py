@@ -13,6 +13,7 @@ from src.model.data_utils import (
 )
 from src.model.training import train_model
 from src.model.build_model import get_model, ModelConfig
+from src.model.naming import checkpoint_name, run_dir_name
 
 
 def parse_args():
@@ -158,6 +159,18 @@ def _sanitize(value):
     return value.replace(" ", "-").replace("/", "-")
 
 
+def _name_knobs(args):
+    """The subset of `args` that the checkpoint name is built from - see src.model.naming,
+    which owns the scheme so train.py, eval_checkpoint.py and the notebooks agree on it."""
+    return {
+        "lam_MTC": args.lam_MTC,
+        "sigma_noise": args.sigma_noise,
+        "lr_means": args.lr_means,
+        "latent_per_condition": args.latent_per_condition,
+        "means_dim": args.means_dim,
+    }
+
+
 def main():
     args = parse_args()
 
@@ -267,7 +280,7 @@ def main():
 
     # Paths
     # Define default name for model and output dir based on hyperparams
-    default_name = "MTC_" + str(args.lam_MTC) + "_sigma_" + str(args.sigma_noise)
+    name_knobs = _name_knobs(args)
 
     # Model will be saved to group share
     model_path = os.path.join(
@@ -279,13 +292,13 @@ def main():
         "/home/jhoefer/sandbox/results", args.dataset, "top_" + str(top_genes)
     )
 
-    # If model_prefix is provided, append it to the model name
-    if args.model_prefix is not None:
-        model_name = args.model_prefix + "_" + default_name + "_model.pt"
-        output_dir_name = args.model_prefix + "_" + default_name
-    else:
-        model_name = default_name + "_model.pt"
-        output_dir_name = default_name
+    # Built by src.model.naming, not concatenated here, so an empty --model_prefix means
+    # "no prefix" in exactly the way the notebooks' resolve_checkpoint reads it. Spelled
+    # out locally this used to test `is not None`, which turned --model_prefix "" into a
+    # leading underscore that no reader would look for.
+    model_name = checkpoint_name(args.model_prefix, **name_knobs)
+    legacy_model_name = checkpoint_name(args.model_prefix, legacy=True, **name_knobs)
+    output_dir_name = run_dir_name(args.model_prefix, **name_knobs)
 
     if args.train_sigma:
         model_path += "_train_sigma"
@@ -401,6 +414,25 @@ def main():
         "L2_rec": [],
     }
     val_metrics_loss = metrics_loss.copy()
+
+    # Checkpoints written before lr_means/lpc entered the name sit at the old path and no
+    # longer resolve. Say so rather than starting from scratch under a name that looks like
+    # a resume - and refuse outright if a resume was actually asked for, since silently
+    # training a fresh model for 14 hours is the expensive failure here.
+    legacy_full = os.path.join(model_path, legacy_model_name)
+    if not os.path.exists(os.path.join(model_path, model_name)) and os.path.exists(legacy_full):
+        message = (
+            f"A checkpoint exists under the pre-lr_means naming scheme:\n"
+            f"  {legacy_full}\n"
+            f"and this run resolves to the new name:\n"
+            f"  {os.path.join(model_path, model_name)}\n"
+            f"They are the same configuration only if that run used lr_means="
+            f"{args.lr_means} and latent_per_condition={args.latent_per_condition}. "
+            f"If so, rename it:\n  mv {legacy_full} {os.path.join(model_path, model_name)}"
+        )
+        if args.checkpoint:
+            raise SystemExit(f"{message}\n\n--checkpoint was requested; refusing to start fresh.")
+        print(f"NOTE: {message}\n")
 
     start_epoch = 0
     log_path = None

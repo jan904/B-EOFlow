@@ -82,22 +82,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_settings_from_name(path):
-    """`5e-3_MTC_0.3_sigma_0.1_model.pt` -> {'lam_MTC': 0.3, 'sigma_noise': 0.1}.
-
-    Read from the filename on purpose: `model_config.sigma_noise` is the *prior's* sigma
-    (a tuple, e.g. `(1.0,)`), not the dequantization noise added to the data in the
-    training loop - that one lives in `kwargs_loss` and never reaches the checkpoint.
-    """
-    name = os.path.basename(path)
-    out = {}
-    for key, token in (("lam_MTC", "MTC_"), ("sigma_noise", "sigma_")):
-        if token in name:
-            try:
-                out[key] = float(name.split(token)[1].split("_")[0])
-            except ValueError:
-                out[key] = None
-    return out
+# the filename scheme lives in src.model.naming, next to the builder that writes it.
+# Re-exported here because this module's callers have always imported it from eval_checkpoint.
+from src.model.naming import run_settings_from_name  # noqa: E402,F401
 
 
 def _parse_combo(tokens):
