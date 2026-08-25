@@ -20,6 +20,7 @@ def train_model(
     save_on_validation=False,
     ood_probe=None,
     ood_probe_every=50,
+    ood_select=True,
 ):
 
     if model_config.model_type == "inn":
@@ -42,6 +43,7 @@ def train_model(
             save_on_validation=save_on_validation,
             ood_probe=ood_probe,
             ood_probe_every=ood_probe_every,
+            ood_select=ood_select,
         )
     elif model_config.model_type == "vae":
         pass
@@ -66,4 +68,5 @@ def train_model(
             save_on_validation=save_on_validation,
             ood_probe=ood_probe,
             ood_probe_every=ood_probe_every,
+            ood_select=ood_select,
         )

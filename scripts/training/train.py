@@ -76,6 +76,22 @@ def parse_args():
         "distinct from --holdout_combo: selecting on a combo makes it a validation set. "
         "Requires --use_metacells.",
     )
+    parser.add_argument(
+        "--probe_holdout",
+        action="store_true",
+        help="probe the combos already held out by --holdout_file/--holdout_combo instead "
+        "of a separate --probe_combo, reporting median and IQR across them. Ten combos "
+        "give a spread where one gives a bare number, but these are the combos the "
+        "results report, so the curve is LOGGED ONLY: no *_best_ood.pt is written unless "
+        "--select_on_ood is passed as well. Mutually exclusive with --probe_combo.",
+    )
+    parser.add_argument(
+        "--select_on_ood",
+        action="store_true",
+        help="with --probe_holdout, also write *_best_ood.pt selected on the held-out "
+        "combos' median MMD. This makes them a validation set - whatever the run reports "
+        "as its test combos is then no longer untouched. Off by default for that reason.",
+    )
     parser.add_argument("--ood_probe_every", type=int, default=50)
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.0)
@@ -179,10 +195,19 @@ def main():
     # out-of-distribution and the curve it produces means nothing. It is kept separate
     # from --holdout_combo on purpose: selecting a checkpoint on a combo turns that combo
     # into a validation set, so the reported test combo must be one nothing selects on.
+    if args.probe_combo and args.probe_holdout:
+        raise ValueError("Pass either --probe_combo or --probe_holdout, not both.")
+    if args.select_on_ood and not args.probe_holdout:
+        raise ValueError("--select_on_ood only applies to --probe_holdout.")
+
     probe_combo = _parse_holdout_combo(args.probe_combo) if args.probe_combo else None
     if probe_combo is not None and not args.use_metacells:
         raise ValueError("--probe_combo requires --use_metacells.")
-    probe_adata = adata if probe_combo is not None else None
+    if args.probe_holdout and not args.use_metacells:
+        raise ValueError("--probe_holdout requires --use_metacells.")
+    # captured before the holdout split below, because the probe scores the combos whose
+    # cells that split removes - it needs the frame that still contains them
+    probe_adata = adata if (probe_combo is not None or args.probe_holdout) else None
 
     if args.holdout_file is not None:
         if args.holdout_combo is not None:
@@ -468,6 +493,7 @@ def main():
 
     NUM_EPOCHS = max(1, np.ceil(args.epochs * args.batch_size / adata.X.shape[0]).astype(int))
     ood_probe = None
+    ood_select = True
     if probe_combo is not None:
         from src.analysis.ood_probe import OODProbe
 
@@ -482,6 +508,35 @@ def main():
         print(
             f"OOD probe on {ood_probe.label} ({ood_probe.n_real} real metacells), "
             f"every {args.ood_probe_every} epochs."
+        )
+    elif args.probe_holdout:
+        from src.analysis.ood_probe import MultiOODProbe
+
+        if not holdout_combos:
+            raise ValueError(
+                "--probe_holdout needs combos to probe: pass --holdout_file or "
+                "--holdout_combo as well."
+            )
+        ood_probe = MultiOODProbe(
+            probe_adata,            # pre-holdout: it still contains the held-out cells
+            holdout_combos,
+            combo_categories,
+            args.conditions,
+            control_label,
+            device=device,
+        )
+        ood_select = args.select_on_ood
+        print(
+            f"OOD probe on {ood_probe.label} ({ood_probe.n_real} real metacells total), "
+            f"every {args.ood_probe_every} epochs."
+        )
+        for name, reason in ood_probe.skipped.items():
+            print(f"  skipped {name}: {reason}")
+        print(
+            "  writing *_best_ood.pt selected on these combos - they are a validation "
+            "set now, not a test set."
+            if ood_select
+            else "  logging only; no checkpoint is selected on these combos."
         )
 
     model, optimizer, metrics_loss, val_metrics_loss, log_path = train_model(
@@ -503,6 +558,7 @@ def main():
         save_on_validation=args.validation,
         ood_probe=ood_probe,
         ood_probe_every=args.ood_probe_every,
+        ood_select=ood_select,
     )
 
 

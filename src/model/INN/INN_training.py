@@ -42,13 +42,19 @@ def train_INN(
     save_on_validation=False,
     ood_probe=None,
     ood_probe_every=50,
+    ood_select=True,
 ):
-    """`ood_probe`: an analysis.ood_probe.OODProbe for a *validation* combo held out
-    alongside the reported test combo. Scored every `ood_probe_every` epochs and logged;
-    the best-MMD state is written next to `save_model_path` as `*_best_ood.pt`, in
-    addition to (not instead of) the usual checkpoint - the NLL keeps improving long
-    after OOD prediction stops, so the last checkpoint is not the one you want for OOD,
-    and both endpoints are worth keeping."""
+    """`ood_probe`: an analysis.ood_probe.OODProbe (one validation combo) or MultiOODProbe
+    (the held-out combos). Scored every `ood_probe_every` epochs and logged, and the
+    history is carried in every checkpoint under `ood_history` so the curve survives
+    whether or not a best-OOD state is written.
+
+    `ood_select`: whether the best-MMD state is written next to `save_model_path` as
+    `*_best_ood.pt`, in addition to (not instead of) the usual checkpoint - the NLL keeps
+    improving long after OOD prediction stops, so the last checkpoint is not the one you
+    want for OOD, and both endpoints are worth keeping. Set it False when the probe runs
+    on the combos being reported: selecting on a combo turns it into a validation set, so
+    those may be logged but must not be selected on."""
 
     condition_type = model_config.condition_type
     train_means = model_config.trainable_means
@@ -344,8 +350,13 @@ def train_INN(
             ood_metrics["combo"] = ood_probe.label
             ood_history.append(ood_metrics)
             logger.info(format_probe(ood_metrics))
+            for name, per in sorted(ood_metrics.get("per_combo", {}).items()):
+                logger.info(
+                    f"    {name}: MMD {per['mmd']:.4f} | R2 {per['r2_top50']:.3f} | "
+                    f"var_ratio {per['var_ratio']:.3f} | acc {per['accuracy']:.1%}"
+                )
 
-            if ood_metrics["mmd"] < best_ood_mmd:
+            if ood_select and ood_metrics["mmd"] < best_ood_mmd:
                 best_ood_mmd = ood_metrics["mmd"]
                 torch.save(
                     {
@@ -373,6 +384,7 @@ def train_INN(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "metrics_loss": losses,
                     "val_metrics_loss": val_losses,
+                    "ood_history": ood_history,
                     "log_path": log_path,
                     "counts": use_counts,
                     "conditions": conditions,
@@ -398,6 +410,7 @@ def train_INN(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "metrics_loss": losses,
                     "val_metrics_loss": val_losses,
+                    "ood_history": ood_history,
                     "log_path": log_path,
                     "counts": use_counts,
                     "conditions": conditions,
@@ -415,6 +428,7 @@ def train_INN(
             "optimizer_state_dict": optimizer.state_dict(),
             "metrics_loss": losses,
             "val_metrics_loss": val_losses,
+            "ood_history": ood_history,
             "log_path": log_path,
             "counts": use_counts,
             "conditions": conditions,

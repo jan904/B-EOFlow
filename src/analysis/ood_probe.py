@@ -123,9 +123,75 @@ class OODProbe:
         }
 
 
+class MultiOODProbe:
+    """One `OODProbe` per named combo, scored together and aggregated.
+
+    For probing the **held-out** combos rather than a separate validation combo: ten combos
+    give a spread where one gives a single number with no error bar, which matters here
+    because a held-out combo carries only ~34 real metacells and the per-combo noise floor
+    is nearly as large as the effect being measured.
+
+    Aggregation is median + IQR, matching `eval_checkpoint.py`'s: the MMD scale differs per
+    combo (each bandwidth is its own median pairwise distance), so a mean across combos is
+    dominated by whichever combo has the largest absolute values.
+
+    Reading this curve is safe; *selecting* a checkpoint on it is not, if these are the
+    combos the paper reports - that turns the test set into a validation set. See
+    `ood_select` in INN_training.train_INN_model.
+    """
+
+    def __init__(self, adata, combos, combo_categories, conditions, control_label, **kwargs):
+        self.probes = {}
+        self.skipped = {}
+        for name, combo in combos.items():
+            try:
+                self.probes[name] = OODProbe(
+                    adata, combo, combo_categories, conditions, control_label, **kwargs
+                )
+            except ValueError as exc:
+                # a combo with too few real or control cells is dropped rather than fatal:
+                # the remaining combos still give a usable curve
+                self.skipped[name] = str(exc)
+        if not self.probes:
+            raise ValueError(
+                f"No probe combo had enough cells; skipped {len(self.skipped)}: {self.skipped}"
+            )
+        self.label = f"{len(self.probes)} holdout combos"
+        self.n_real = sum(probe.n_real for probe in self.probes.values())
+
+    @torch.no_grad()
+    def __call__(self, model):
+        per_combo = {name: probe(model) for name, probe in self.probes.items()}
+
+        def values(key):
+            return np.array([m[key] for m in per_combo.values()], dtype=float)
+
+        mmd_v, r2_v = values("mmd"), values("r2_top50")
+        metrics = {
+            # medians keep the same key names a single OODProbe returns, so the training
+            # loop and `format_probe` need no special case for the multi-combo variant
+            "mmd": float(np.median(mmd_v)),
+            "r2_top50": float(np.median(r2_v)),
+            "cos2_top50": float(np.median(values("cos2_top50"))),
+            "var_ratio": float(np.median(values("var_ratio"))),
+            "accuracy": float(np.mean(values("accuracy"))),
+            "mmd_iqr": [float(np.quantile(mmd_v, 0.25)), float(np.quantile(mmd_v, 0.75))],
+            "r2_top50_iqr": [float(np.quantile(r2_v, 0.25)), float(np.quantile(r2_v, 0.75))],
+            "n_combos": len(per_combo),
+            "per_combo": per_combo,
+        }
+        return metrics
+
+
 def format_probe(metrics):
+    spread = ""
+    if "mmd_iqr" in metrics:
+        spread = (
+            f" (n={metrics['n_combos']}, MMD IQR "
+            f"{metrics['mmd_iqr'][0]:.4f}-{metrics['mmd_iqr'][1]:.4f})"
+        )
     return (
         f"OOD[{metrics.get('combo', '')}] MMD: {metrics['mmd']:.4f} | "
         f"R2_top50: {metrics['r2_top50']:.3f} | var_ratio: {metrics['var_ratio']:.3f} | "
-        f"acc: {metrics['accuracy']:.1%}"
+        f"acc: {metrics['accuracy']:.1%}{spread}"
     )
