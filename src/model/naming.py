@@ -38,13 +38,18 @@ _FIELDS = (
 )
 
 
-def run_name(lam_MTC, sigma_noise, lr_means, latent_per_condition=None, means_dim=None):
-    """`MTC_0.6_sigma_0.5_lrm_0.0005_lpc_2`.
+def run_name(lam_MTC, sigma_noise, lr_means, latent_per_condition=None, means_dim=None,
+             balance_classes=False):
+    """`MTC_0.6_sigma_0.5_lrm_0.0005_lpc_2_bal`.
 
     A knob whose value is None is left out rather than spelled `None`: absence reads as
     "the model's own default", which is what it is. `means_dim` overrides
     `latent_per_condition` in INNs_model, so both are recorded when both are set - which
     one is set is itself information, since the same means_dim can arrive either way.
+
+    `balance_classes` is a bare `bal` flag rather than `bal_1`: it is on or off, and the
+    valueless form keeps the common (off) name unchanged, so every checkpoint written
+    before it was recorded still resolves.
     """
     parts = [
         "MTC_" + str(lam_MTC),
@@ -55,6 +60,8 @@ def run_name(lam_MTC, sigma_noise, lr_means, latent_per_condition=None, means_di
         parts.append("lpc_" + str(latent_per_condition))
     if means_dim is not None:
         parts.append("mdim_" + str(means_dim))
+    if balance_classes:
+        parts.append("bal")
     return "_".join(parts)
 
 
@@ -159,4 +166,8 @@ def run_settings_from_name(path):
                 out[key] = cast(name.split(token)[1].split("_")[0])
             except ValueError:
                 out[key] = None
+    # valueless flag, so it is matched as a whole `_`-delimited part rather than as a
+    # substring - "bal" would otherwise also fire on a future "_balance_0.3" token
+    if "bal" in name.split("_model")[0].split("_"):
+        out["balance_classes"] = True
     return out

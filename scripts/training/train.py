@@ -164,6 +164,7 @@ def _name_knobs(args):
         "lr_means": args.lr_means,
         "latent_per_condition": args.latent_per_condition,
         "means_dim": args.means_dim,
+        "balance_classes": args.balance_classes,
     }
 
 

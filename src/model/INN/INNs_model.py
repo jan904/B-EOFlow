@@ -250,10 +250,10 @@ class ModelWithMixturePrior(nn.Module):
                 self.combo_index = None
 
             # per-cell-type gain on the treatment embedding (see the class docstring).
-            # Initialized at 1, i.e. exactly the additive prior, so a run with the gain
-            # enabled starts from the model a purely additive run would have and any
-            # departure from additivity has to be earned by the likelihood.
-            self.treatment_gain = None
+            # Stored in log space as `gain_log` and exponentiated to `w` by the
+            # `treatment_gain` property; `gain_log` initializes at 0, so w = 1 and the
+            # model starts as exactly the additive prior.
+            self.gain_log = None
             self.gain_factor = None
             if treatment_gain:
                 if not self.factorized:
@@ -275,8 +275,8 @@ class ModelWithMixturePrior(nn.Module):
                         "control_condition/control_label on the config."
                     )
                 self.gain_factor = 1 - int(control_factor)
-                self.treatment_gain = nn.Parameter(
-                    torch.ones(condition_shapes[self.gain_factor]), requires_grad=True
+                self.gain_log = nn.Parameter(
+                    torch.zeros(condition_shapes[self.gain_factor]), requires_grad=True
                 )
 
             self.log_sigma = None
@@ -306,8 +306,28 @@ class ModelWithMixturePrior(nn.Module):
             self.means_seperation = None
             self.control_factor = None
             self.control_level = None
-            self.treatment_gain = None
+            self.gain_log = None
             self.gain_factor = None
+
+    @property
+    def treatment_gain(self):
+        """(n_gain_levels,) per-cell-type gain `w`, or None.
+
+        `w = exp(s - mean(s))`, which fixes the gauge `w * b` would otherwise leave free:
+        scaling every w by c and every b by 1/c leaves every mu unchanged, so the raw
+        parameterization let the whole vector drift (it walked from 1.0 to a median of
+        1.5 within 600 epochs) and made `weight_decay` pull along a direction the
+        likelihood does not see. Subtracting the mean in log space pins the geometric
+        mean of w at exactly 1, so w is identifiable and a single value is readable on
+        its own rather than only against the others.
+
+        The exponential also keeps w > 0. A negative gain would mean a cell type
+        responding along the *reverse* of the shared treatment direction, which is a fit
+        artifact rather than something the rank-1 form is meant to express.
+        """
+        if self.gain_log is None:
+            return None
+        return torch.exp(self.gain_log - self.gain_log.mean())
 
     def _effective_factor(self, i):
         """Factor `i`'s level embeddings with the gauge applied.
@@ -359,8 +379,10 @@ class ModelWithMixturePrior(nn.Module):
         """Mixture-prior parameters (factors or free means), for their own lr group."""
         if self.factorized:
             params = list(self.factor_emb.parameters())
-            if self.treatment_gain is not None:
-                params.append(self.treatment_gain)
+            # gain_log, not the `treatment_gain` property: the property builds a new
+            # tensor each call, so optimizing it would optimize a temporary
+            if self.gain_log is not None:
+                params.append(self.gain_log)
             return params
         return [] if self.means_free is None else [self.means_free]
 
@@ -368,8 +390,8 @@ class ModelWithMixturePrior(nn.Module):
         """State-dict names of `prior_parameters`, to exclude them from the base group."""
         if self.factorized:
             names = {f"factor_emb.{i}" for i in range(len(self.factor_emb))}
-            if self.treatment_gain is not None:
-                names.add("treatment_gain")
+            if self.gain_log is not None:
+                names.add("gain_log")
             return names
         return {"means_free"}
 

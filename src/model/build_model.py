@@ -130,6 +130,29 @@ def remap_keys(model, state_dict):
 
         remapped_state[k] = v
 
+    # Old gain checkpoint: `treatment_gain` held w directly; it is now `gain_log`, with
+    # w = exp(s - mean(s)) so the geometric mean of w is pinned at 1. Rescaling w by that
+    # geometric mean would change every mu, so the same factor is multiplied back into
+    # the treatment embedding - `mu = a + w*b` is then bit-for-bit what it was, and only
+    # the split between w and b moves.
+    if "treatment_gain" in remapped_state and "gain_log" in model_keys:
+        w = remapped_state.pop("treatment_gain").float()
+        if (w <= 0).any():
+            raise RuntimeError(
+                f"Checkpoint has non-positive treatment_gain values ({w[w <= 0].tolist()}), "
+                "which the log parameterization cannot represent. A negative gain means a "
+                "cell type responding along the reverse of the shared treatment direction; "
+                "retrain rather than converting."
+            )
+        log_w = torch.log(w)
+        remapped_state["gain_log"] = log_w - log_w.mean()
+        geo_mean = torch.exp(log_w.mean())
+        emb_key = f"factor_emb.{model.control_factor}"
+        if emb_key in remapped_state:
+            remapped_state[emb_key] = remapped_state[emb_key] * geo_mean
+            print(f"Converted treatment_gain -> gain_log (geometric mean {geo_mean:.4f} "
+                  f"folded into {emb_key}; the prior is unchanged).")
+
     missing, unexpected = model.load_state_dict(remapped_state, strict=False)
 
     # The prior block is the one thing that must never be silently left at init. A
@@ -158,14 +181,18 @@ def remap_keys(model, state_dict):
     # filename. The other direction is fine and deliberately allowed: `treatment_gain`
     # initializes at 1, so a purely additive checkpoint loads into a gain model as exactly
     # the model it already was, which is how a gain run warm-starts from an additive one.
-    if "treatment_gain" in unexpected and getattr(model, "treatment_gain", None) is None:
+    carries_gain = {"treatment_gain", "gain_log"} & set(unexpected)
+    if carries_gain and getattr(model, "gain_log", None) is None:
         raise RuntimeError(
-            "Checkpoint carries a learned treatment_gain but the model has none - its "
-            "means would silently differ. Rebuild the model with treatment_gain=True."
+            f"Checkpoint carries a learned gain ({sorted(carries_gain)}) but the model has "
+            "none - its means would silently differ. Rebuild the model with "
+            "treatment_gain=True."
         )
 
     non_prior_missing = [
-        k for k in missing if not k.startswith(("means", "factor_emb", "treatment_gain"))
+        k
+        for k in missing
+        if not k.startswith(("means", "factor_emb", "treatment_gain", "gain_log"))
     ]
 
     if non_prior_missing:
