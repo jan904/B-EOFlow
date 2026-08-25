@@ -13,7 +13,7 @@ from src.model.data_utils import (
 )
 from src.model.training import train_model
 from src.model.build_model import get_model, ModelConfig
-from src.model.naming import checkpoint_name, run_dir_name
+from src.model.naming import checkpoint_name, run_dir_name, holdout_suffix
 
 
 def parse_args():
@@ -153,10 +153,6 @@ def _parse_holdout_combo(tokens):
             raise ValueError(f"Invalid --holdout_combo token '{token}', expected 'key=value'.")
         combo[key] = value
     return combo
-
-
-def _sanitize(value):
-    return value.replace(" ", "-").replace("/", "-")
 
 
 def _name_knobs(args):
@@ -308,20 +304,12 @@ def main():
         output_dir_path += "_metacells"
 
         if holdout_combo is not None:
-            # One path component for the holdout SET. With several combos the old
-            # per-combo string ("_holdout_cytokine-IL-2_cell_type-CD8-Memory") would be
-            # unusable, so a set name is used instead; a single combo keeps the old
-            # spelling so existing checkpoints still resolve.
-            if args.holdout_file is not None:
-                stem = os.path.splitext(os.path.basename(args.holdout_file))[0]
-                # "holdout_combos.json" -> "combos", so the path reads
-                # "_holdout_combos" rather than "_holdout_holdout_combos"
-                stem = stem[len("holdout_") :] if stem.startswith("holdout_") else stem
-                set_name = args.holdout_name or _sanitize(stem)
-                suffix = f"_holdout_{set_name}"
-            else:
-                combo_str = "_".join(f"{k}-{_sanitize(v)}" for k, v in holdout_combo.items())
-                suffix = f"_holdout_{combo_str}"
+            # built by src.model.naming so the notebooks derive the identical component
+            suffix = holdout_suffix(
+                holdout_file=args.holdout_file,
+                combo=holdout_combo,
+                holdout_name=args.holdout_name,
+            )
             model_path += suffix
             output_dir_path += suffix
     else:

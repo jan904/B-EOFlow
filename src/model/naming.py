@@ -113,6 +113,36 @@ def resolve_checkpoint(model_path, prefix=None, postfix="", required=True, **kno
     raise FileNotFoundError(f"No checkpoint found. Tried:\n  {tried}")
 
 
+def sanitize(value):
+    """Path-safe: spaces and slashes both become '-'. The slash matters - 'B
+    Intermediate/Memory' is a real cell type, and left alone it would open a directory
+    level rather than name one."""
+    return str(value).replace(" ", "-").replace("/", "-")
+
+
+def holdout_suffix(holdout_file=None, combo=None, holdout_name=None):
+    """The `_holdout_*` path component, or '' when nothing is held out.
+
+    One component names the SET, not its members: with ten combos the per-combo string
+    would be unusable, so a file contributes its own name instead
+    (`holdout_combos.json` -> `_holdout_combos`). A single combo keeps the old per-combo
+    spelling, so checkpoints written before the file existed still resolve.
+
+    The set's *contents* are therefore not in the path - two different files with the
+    same basename collide. Readers should check the loaded config's `holdout_combos`
+    against what they expect rather than trusting the directory.
+    """
+    if holdout_file:
+        stem = os.path.splitext(os.path.basename(holdout_file))[0]
+        # "holdout_combos.json" -> "combos", so it reads "_holdout_combos" rather than
+        # "_holdout_holdout_combos"
+        stem = stem[len("holdout_"):] if stem.startswith("holdout_") else stem
+        return "_holdout_" + (holdout_name or sanitize(stem))
+    if combo:
+        return "_holdout_" + "_".join(f"{k}-{sanitize(v)}" for k, v in combo.items())
+    return ""
+
+
 def run_settings_from_name(path):
     """`5e-3_MTC_0.3_sigma_0.1_lrm_0.0005_lpc_2_model.pt` ->
     {'lam_MTC': 0.3, 'sigma_noise': 0.1, 'lr_means': 0.0005, 'latent_per_condition': 2}.
