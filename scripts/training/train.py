@@ -54,8 +54,8 @@ def parse_args():
         "--holdout_file",
         type=str,
         default=None,
-        help="JSON file mapping a name to a combo, e.g. {\"combo_1\": {\"cytokine\": \"IL-2\", "
-        "\"cell_type\": \"CD8 Memory\"}, ...}. Every combo in it is held out of training, so "
+        help='JSON file mapping a name to a combo, e.g. {"combo_1": {"cytokine": "IL-2", '
+        '"cell_type": "CD8 Memory"}, ...}. Every combo in it is held out of training, so '
         "evaluation gets several OOD combos instead of one - see configs/holdout_combos.json. "
         "Mutually exclusive with --holdout_combo. Requires --use_metacells.",
     )
@@ -103,7 +103,7 @@ def parse_args():
         "--supervise_latent_meaning",
         type=str,
         default=None,
-        choices=["counterfactual", "partition", "both", None],
+        choices=["partition", None],
     )
     parser.add_argument("--lam_supervise", type=float, default=1.0)
     parser.add_argument("--partition_divisor", type=int, default=8)
@@ -236,7 +236,7 @@ def main():
         # several rather than one is what makes the OOD numbers interpretable: a single
         # combo gives one value with no error bar, and the ones we have used carry ~34 real
         # metacells, where a noise floor is nearly as large as the effect being measured.
-        holdout_combo = next(iter(holdout_combos.values()))   # kept for downstream config
+        holdout_combo = next(iter(holdout_combos.values()))  # kept for downstream config
         to_hold = list(holdout_combos.values())
         if probe_combo is not None:
             to_hold.append(probe_combo)
@@ -247,9 +247,7 @@ def main():
             print(f"  plus the probe combo {probe_combo}")
         print(f"Training on the remaining {adata.n_obs} metacells.")
     elif probe_combo is not None:
-        adata, _ = split_holdout_combinations(
-            adata, [probe_combo], group_keys=metacell_group_keys
-        )
+        adata, _ = split_holdout_combinations(adata, [probe_combo], group_keys=metacell_group_keys)
         print(f"Held out probe combo {probe_combo}; {adata.n_obs} metacells remain.")
 
     dataset, dataloader, test_dataset, test_dataloader = prepare_train_test_data(
@@ -519,7 +517,7 @@ def main():
         from src.analysis.ood_probe import OODProbe
 
         ood_probe = OODProbe(
-            probe_adata,            # pre-holdout: it still contains the probe combo's cells
+            probe_adata,  # pre-holdout: it still contains the probe combo's cells
             probe_combo,
             combo_categories,
             args.conditions,
@@ -539,7 +537,7 @@ def main():
                 "--holdout_combo as well."
             )
         ood_probe = MultiOODProbe(
-            probe_adata,            # pre-holdout: it still contains the held-out cells
+            probe_adata,  # pre-holdout: it still contains the held-out cells
             holdout_combos,
             combo_categories,
             args.conditions,

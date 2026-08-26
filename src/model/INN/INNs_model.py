@@ -88,6 +88,7 @@ class ModelWithMixturePrior(nn.Module):
         control_factor=None,
         control_level=None,
         treatment_gain=False,
+        partition_means=True,
     ):
         """`combo_index` (with `condition_shapes`) switches the mixture prior from one
         free mean per combo to a **factorized** one:
@@ -151,14 +152,35 @@ class ModelWithMixturePrior(nn.Module):
             if self.factorized and condition_shapes is None:
                 raise ValueError("condition_shapes must be given alongside combo_index.")
 
-            if means_dim is not None:
+            if not partition_means:
+                # No `supervise_latent_meaning`, so nothing in the loss ever treats the
+                # first `means_dim` dims as a block - the prior means therefore span the
+                # whole latent space and there is no fixed-zero tail.
+                #
+                # Unconditional, ahead of every rule below: an explicit `means_dim` is
+                # ignored rather than silently carving out a block the objective does not
+                # know about. Restricting the block is what the partition *is*.
+                if means_dim is not None and means_dim != N_dim:
+                    print(
+                        f"[ModelWithMixturePrior] means_dim={means_dim} ignored: without "
+                        f"supervise_latent_meaning the prior means are full width ({N_dim})."
+                    )
+                self.means_dim = N_dim
+            elif means_dim is not None:
                 self.means_dim = means_dim
-            elif latent_per_condition is not None:
-                self.means_dim = latent_per_condition * n_components
             elif self.factorized:
                 # enough room for every level to get its own orthogonal direction, with
                 # slack; `sum(condition_shapes)` is the hard floor asserted below.
+                #
+                # Checked *before* `latent_per_condition`, which sizes free means: a
+                # factorized prior composes each component from `sum(condition_shapes)`
+                # level vectors, so that is what it needs. The other order let
+                # `--latent_per_condition 4` widen the block to 4*198 = 792 on a
+                # factorized run whose learned means spanned an effective rank of 28 -
+                # 764 dims of slack, and a partition weight computed off the wrong width.
                 self.means_dim = 2 * int(sum(condition_shapes))
+            elif latent_per_condition is not None:
+                self.means_dim = latent_per_condition * n_components
 
             if self.means_dim > N_dim:
                 raise ValueError(f"means_dim ({self.means_dim}) cannot exceed N_dim ({N_dim}).")
@@ -783,6 +805,14 @@ def get_INN(config):
         control_factor=control_factor,
         control_level=control_level,
         treatment_gain=treatment_gain,
+        # The flag now controls whether the latent space is partitioned at all: without
+        # it the means are full width, with it they are restricted to the condition block
+        # the partition loss reweights. Compared against "partition" specifically rather
+        # than for truthiness - the config dataclass defaults this to False while
+        # train.py's argparse defaults it to None (both mean no partition), and argparse
+        # still offers "counterfactual"/"both", which no longer have a loss branch and so
+        # must not carve out a block nothing reweights.
+        partition_means=getattr(config, "supervise_latent_meaning", None) == "partition",
     )
 
     return model

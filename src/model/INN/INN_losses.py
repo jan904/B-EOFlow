@@ -168,28 +168,7 @@ def get_loss(
     )  # NLL per dimension
     NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
 
-    if model_config.supervise_latent_meaning == "counterfactual":
-        assert (
-            model_config.ctrl_idx is not None
-        ), "ctrl_idx must be provided when supervise_latent_meaning is True!"
-
-        cond_idx = torch.argmax(c_prior, dim=1)  # [B]
-        c_ctrl = torch.zeros_like(c_prior)
-        c_ctrl[:, model_config.ctrl_idx] = 1.0
-
-        mask = torch.ones_like(z)
-        mask.scatter_(1, cond_idx.unsqueeze(1), 0.0)
-        z_ctrl = z * mask
-
-        NLL_z_i_ctrl = get_NLL_z(
-            kwargs_data, z=z_ctrl, c=c_ctrl, means=model.means, log_sigma=model.log_sigma
-        )  # NLL per dimension
-
-        NLL += model_config.lam_supervise * NLL_z_i_ctrl.sum(
-            -1
-        )  # add supervised latent meaning loss
-
-    elif model_config.supervise_latent_meaning == "partition":
+    if model_config.supervise_latent_meaning == "partition":
         NLL_z_i = get_NLL_z(
             kwargs_data, z=z, c=c_prior, means=model.means, log_sigma=model.log_sigma
         )  # NLL per dimension
@@ -220,41 +199,27 @@ def get_loss(
             class_count = torch.bincount(
                 class_idx, minlength=len(model.means_active)
             ).float()  # [C]
-            class_weights = 1.0 / (class_count + 1e-8)  # [C]
-            class_weights = class_weights / class_weights.mean()  # normalize
-            sample_weights = class_weights[class_idx]  # [B]
+
+            # Normalize over the samples, not over the C combo slots. `class_count` is
+            # per batch, and with C=198 slots at batch 1024 roughly 72 of them are empty
+            # in any given batch - under the old `1/(count + 1e-8)` those absent slots
+            # took weight 1e8 and, being a third of the vector, dominated the mean the
+            # weights were then divided by. Since `sample_weights` only ever indexes
+            # classes that ARE present, every sample came out at ~3e-9: the prior term
+            # was scaled away to nothing while `- ljd_enc` below stayed at full size, so
+            # the flow maximised the encoder log-det unopposed and z diverged from epoch
+            # one (z2 ~ 1e14, then NaN).
+            #
+            # Indexing first and normalizing after keeps the mean weight at exactly 1, so
+            # balancing changes the NLL's *distribution* across combos without touching
+            # its scale. No epsilon is needed: a class reached through `class_idx` has at
+            # least one sample in the batch by construction.
+            sample_weights = 1.0 / class_count[class_idx]  # [B]
+            sample_weights = sample_weights / sample_weights.mean()
 
             NLL_z_i = NLL_z_i * sample_weights[:, None]  # broadcast across dimensions
 
         NLL = NLL_z_i.sum(-1) - ljd_enc  # NLL per sample [B]
-
-    elif model_config.supervise_latent_meaning == "both":
-        assert (
-            model_config.ctrl_idx is not None
-        ), "ctrl_idx must be provided when supervise_latent_meaning is True!"
-
-        cond_idx = torch.argmax(c_prior, dim=1)  # [B]
-        c_ctrl = torch.zeros_like(c_prior)
-        c_ctrl[:, model_config.ctrl_idx] = 1.0
-
-        mask = torch.ones_like(z)
-        mask.scatter_(1, cond_idx.unsqueeze(1), 0.0)
-        z_ctrl = z * mask
-
-        NLL_z_i_cond = get_NLL_z(kwargs_data, z=z[:, :11], c=c_prior, means=model.means_active)
-        NLL_z_i_ctrl = get_NLL_z(kwargs_data, z=z_ctrl[:, :11], c=c_ctrl, means=model.means_active)
-        NLL_z_i_rest = get_NLL_z(kwargs_data, z=z[:, 11:])
-
-        NLL_z_i = torch.cat([NLL_z_i_cond, NLL_z_i_rest], dim=1)
-
-        weight = (z.shape[1] - 11) / 11 / 8
-
-        NLL_z_i_cond = weight * NLL_z_i_cond.sum(-1) + NLL_z_i_rest.sum(-1)
-        NLL_z_i_ctrl = weight * NLL_z_i_ctrl.sum(-1) + NLL_z_i_rest.sum(-1)
-
-        NLL = (
-            model_config.lam_supervise * NLL_z_i_ctrl.sum(-1) + NLL_z_i_cond.sum(-1) - ljd_enc
-        )  # NLL per sample [B]
 
     if use_MER or eval_MEMetrics:
         if mode_MER == "full":

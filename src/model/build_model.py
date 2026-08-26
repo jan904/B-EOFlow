@@ -130,6 +130,38 @@ def remap_keys(model, state_dict):
 
         remapped_state[k] = v
 
+    # Prior-block width change. `supervise_latent_meaning` now decides whether the means
+    # are restricted to a condition block at all, so a checkpoint trained with a narrower
+    # block loads into a full-width model by zero-padding: the old model kept exactly
+    # those zeros in its fixed `means_zero` buffer, so `means` comes out bit-for-bit the
+    # same and only the tail's trainability changes.
+    #
+    # Narrowing is not attempted. The learned shifts are dense across the old block, so
+    # truncating would silently discard fitted values - pass `means_dim` explicitly to
+    # rebuild at the checkpoint's own width instead.
+    model_state = model.state_dict()
+    for key in [k for k in remapped_state if k == "means_free" or k.startswith("factor_emb.")]:
+        old, target = remapped_state[key], model_state.get(key)
+        if target is None or old.shape == target.shape:
+            continue
+        if old.ndim == 2 and old.shape[0] == target.shape[0] and old.shape[1] < target.shape[1]:
+            pad = torch.zeros(
+                old.shape[0], target.shape[1] - old.shape[1], dtype=old.dtype, device=old.device
+            )
+            remapped_state[key] = torch.cat([old, pad], dim=1)
+            print(
+                f"Zero-padded {key} from {tuple(old.shape)} to {tuple(target.shape)} "
+                "(the old model pinned those dims at zero; the prior is unchanged)."
+            )
+        else:
+            raise RuntimeError(
+                f"Checkpoint's {key} is {tuple(old.shape)} but this model wants "
+                f"{tuple(target.shape)}, and that is not a widening this can pad. The "
+                "prior block was sized differently - rebuild with the checkpoint's own "
+                "`means_dim` (and matching supervise_latent_meaning) rather than "
+                "reshaping fitted means."
+            )
+
     # Old gain checkpoint: `treatment_gain` held w directly; it is now `gain_log`, with
     # w = exp(s - mean(s)) so the geometric mean of w is pinned at 1. Rescaling w by that
     # geometric mean would change every mu, so the same factor is multiplied back into
