@@ -107,6 +107,11 @@ def parse_args():
     )
     parser.add_argument("--lam_supervise", type=float, default=1.0)
     parser.add_argument("--partition_divisor", type=int, default=8)
+    # Explicit NLL weight on the condition block. Unset keeps the partition_divisor
+    # formula, whose value scales as 1/means_dim - so --latent_per_condition changes
+    # the objective as well as the capacity. Set this to hold the weight fixed across
+    # a width sweep.
+    parser.add_argument("--partition_weight", type=float, default=None)
     # None -> 2*sqrt(2 ln K), see INNs_model.default_means_seperation
     parser.add_argument("--means_seperation", type=float, default=None)
     # Factorized mixture prior: mu(combo) = sum of per-condition level embeddings
@@ -489,6 +494,7 @@ def main():
             lam_supervise=args.lam_supervise,
             latent_per_condition=args.latent_per_condition,
             partition_divisor=args.partition_divisor,
+            partition_weight=args.partition_weight,
             trainable_sigma=args.train_sigma,
             lr_sigma=args.lr_sigma,
             balance_classes=args.balance_classes,

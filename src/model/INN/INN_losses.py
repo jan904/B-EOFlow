@@ -187,8 +187,18 @@ def get_loss(
         # divisor=8 that produced 1.098 instead of 0.486: a dimension-vs-component mixup
         # that also happened to be silently correct only when partition_divisor equalled
         # latent_per_condition.
+        #
+        # `partition_weight`, when set, replaces the derived value outright. The formula
+        # above scales as 1/means_dim, so widening the block silently weakens the pull on
+        # exactly the dims the prior means occupy - measured across a width sweep, the
+        # empirical-vs-learned mean gap grew from 6.8% of ||mu|| at means_dim=29 to 51.8%
+        # at 1450, and the share of that gap which corrupts a counterfactual (rather than
+        # cancelling as a per-cell-type offset) went from 23% to 52%. Pinning the weight
+        # makes `latent_per_condition` a capacity knob only.
         means_dim = model.means_active.shape[1]
-        factor = (N_dim - means_dim) / means_dim / model_config.partition_divisor
+        factor = getattr(model_config, "partition_weight", None)
+        if factor is None:
+            factor = (N_dim - means_dim) / means_dim / model_config.partition_divisor
         dim_weight = torch.ones(N_dim, device=device)
         dim_weight[:means_dim] = factor  # upweight or downweight the condition dims
 

@@ -7,6 +7,8 @@ import decoupler as dc
 import matplotlib.pyplot as plt
 import os
 
+DIR_SEP = " | "
+
 
 def jaccard(set1, set2):
 
@@ -234,3 +236,204 @@ def bulk_enrichment_analysis(
         # plt.show()
 
         analyzer.set_enrichment_scores(hm_names, hm_acts)
+
+
+# ---------------------------------------------------------------------------
+# Direction enrichment: do the *learned vectors* encode biological programmes?
+#
+# `bulk_enrichment_analysis` above scores latent *axes* - row k of the mean decoder
+# Jacobian is the gene loading of dim k, which is the right unit when the prior is
+# axis-aligned. Under a factorized mixture prior it is not: with latent_per_condition=4
+# and 198 components the condition block is means_dim=792 dims wide, but the learned
+# means block has effective rank ~28 and every treatment shift is dense across all 792
+# dims. No single axis carries a cytokine, and the flow may rotate freely within the
+# block, so an individual axis is not identifiable.
+#
+# What is identifiable is a *direction*. These helpers carry a latent direction `v` to
+# gene space through the decoder's local linear map,
+#
+#     dx = J_dec(z0) . v
+#
+# with a forward-mode JVP - one pass per direction, no 1937x1937 Jacobian materialized
+# (verified against central finite differences at cosine 0.999999). The resulting
+# (directions x genes) frame goes straight into the same `dc.mt.ulm` call
+# `bulk_enrichment_analysis` uses.
+#
+# Scope the base points the same way the axis analysis does - `analyzer.subset(...)`
+# then read `.adata` from the subset - because J is a *local* map: the same direction
+# reads differently at CD14 Mono control cells than at CD4 Memory ones (measured cosine
+# 0.90 between the two, against a 0.995 sampling-noise floor).
+# ---------------------------------------------------------------------------
+
+
+def learned_subspace(model, rank_tol=1e-3):
+    """`(basis, singular_values, rank)` of the mixture-prior means block.
+
+    The means are (n_components, N_dim) but only the first `means_dim` columns are
+    learnable, and a factorized prior composes every component from `sum(condition_shapes)`
+    level vectors - so the block collapses to a subspace of about that size, less the one
+    degree of freedom the control gauge pins. `basis` rows are right singular vectors,
+    zero-padded back to N_dim so they can be used as latent directions directly.
+    """
+    means = model.means.detach().float()
+    block = means[:, : model.means_dim]
+    _, S, Vh = torch.linalg.svd(block, full_matrices=False)
+    rank = int((S > S.max() * rank_tol).sum())
+    basis = torch.zeros(rank, model.N_dim, device=means.device, dtype=means.dtype)
+    basis[:, : model.means_dim] = Vh[:rank]
+    return basis, S[:rank], rank
+
+
+def latent_directions(
+    model,
+    combo_categories,
+    conditions,
+    condition_key,
+    control_label,
+    cell_type_key=None,
+    cell_type=None,
+    cytokines=None,
+    cell_types=None,
+    n_components=None,
+):
+    """The model's own learned vectors, as `{name: (family, latent vector)}`.
+
+    Three families:
+      `cytokine`  - `mu(cy, ct) - mu(PBS, ct)`, the learned treatment shift.
+      `cell_type` - each cell type's control mean minus the average one, i.e. identity.
+                    Centred because `a_ct` is only identified up to a global offset.
+      `component` - right singular vectors of the means block: the axes the prior
+                    actually uses, and the honest replacement for enriching all 792 dims.
+
+    `cell_type` picks which cell type the treatment shifts are read at. Irrelevant for a
+    purely additive prior - the shift is the same everywhere by construction - but not
+    under `treatment_gain`, where it is `w_ct * b_cy`. It is recorded in the returned
+    info dict so a figure cannot hide which one was used.
+    """
+    if cell_type_key is None:
+        cell_type_key = next(k for k in conditions if k != condition_key)
+
+    means = model.means.detach()
+    order = list(conditions)
+    levels = {c: sorted({lbl.split("__")[i] for lbl in combo_categories})
+              for i, c in enumerate(order)}
+    cytokines = cytokines or [c for c in levels[condition_key] if c != control_label]
+    cell_types = cell_types or levels[cell_type_key]
+    if cell_type is None:
+        cell_type = cell_types[0]
+
+    def index(cy, ct):
+        label = "__".join(str({condition_key: cy, cell_type_key: ct}[k]) for k in order)
+        return combo_categories.index(label) if label in combo_categories else None
+
+    out = {}
+
+    ctrl_at = index(control_label, cell_type)
+    for cy in cytokines:
+        i = index(cy, cell_type)
+        if i is not None and ctrl_at is not None:
+            out[f"cy{DIR_SEP}{cy}"] = ("cytokine", means[i] - means[ctrl_at])
+
+    ct_vecs = {ct: means[index(control_label, ct)]
+               for ct in cell_types if index(control_label, ct) is not None}
+    if ct_vecs:
+        centre = torch.stack(list(ct_vecs.values())).mean(0)
+        for ct, v in ct_vecs.items():
+            out[f"ct{DIR_SEP}{ct}"] = ("cell_type", v - centre)
+
+    basis, svals, rank = learned_subspace(model)
+    for i in range(rank if n_components is None else min(rank, n_components)):
+        out[f"pc{DIR_SEP}{i}"] = ("component", basis[i])
+
+    info = {"cell_type_read_at": cell_type, "subspace_rank": rank,
+            "singular_values": svals.cpu().numpy()}
+    return out, info
+
+
+def null_directions(model, reference_norm, n=50, seed=0):
+    """Matched random directions scaled to `reference_norm`, the control the existing
+    `padj < 0.05` filter cannot provide.
+
+    Two families, because they answer different questions:
+      `null_shared`    - random directions in the shared N(0,1) block (dims >= means_dim),
+                         which no condition ever moves. The floor for "a direction the
+                         prior never learned".
+      `null_condition` - random directions inside the condition block but projected
+                         orthogonal to the learned subspace. The sharper control: same
+                         block, same scale, simply not a direction the model uses.
+
+    Pass `reference_norm = median ||b_cy||` so the nulls are the same length as the real
+    directions - an unscaled random vector would fail on magnitude alone.
+    """
+    g = torch.Generator().manual_seed(seed)
+    N, M = model.N_dim, model.means_dim
+    basis, _, _ = learned_subspace(model)
+    basis = basis.cpu().float()
+
+    out = {}
+    for i in range(n):
+        v = torch.zeros(N)
+        v[M:] = torch.randn(N - M, generator=g)
+        out[f"null_shared{DIR_SEP}{i}"] = ("null_shared", v / v.norm() * reference_norm)
+
+        u = torch.zeros(N)
+        u[:M] = torch.randn(M, generator=g)
+        u = u - basis.T @ (basis @ u)  # project out the learned subspace
+        if u.norm() > 1e-8:
+            out[f"null_condition{DIR_SEP}{i}"] = (
+                "null_condition", u / u.norm() * reference_norm)
+    return out
+
+
+def direction_gene_loadings(analyzer, directions, n_cells=64, batch_size=64, seed=0):
+    """`(loadings, meta)` - `J_dec(z0) . v` averaged over control base cells, one row per
+    direction, columns genes.
+
+    Base points are the control cells of `analyzer.adata`, so scope the analyzer first
+    (`analyzer.subset(covariates=["cell_type"], keys=["CD14 Mono"])`) to read the
+    directions at one cell type. `loadings` drops straight into the same call
+    `bulk_enrichment_analysis` makes:
+
+        acts, padj = dc.mt.ulm(data=loadings, net=dc.op.hallmark(organism="human"))
+    """
+    adata = analyzer.adata
+    mask = (adata.obs[analyzer.labels_key].astype(str) == analyzer.control_label).to_numpy()
+    if not mask.any():
+        raise ValueError(
+            f"No '{analyzer.control_label}' cells in this analyzer's adata - the "
+            "directions are displacements away from control, so there is no base point."
+        )
+
+    idx = np.flatnonzero(mask)
+    if len(idx) > n_cells:
+        idx = np.random.default_rng(seed).choice(idx, n_cells, replace=False)
+
+    X = adata.X[idx]
+    X = X.toarray() if hasattr(X, "toarray") else np.asarray(X)
+    x0 = torch.as_tensor(X, device=analyzer.device, dtype=analyzer.dtype)
+    with torch.no_grad():
+        z0, _ = analyzer.model(x0, rev=False)
+
+    decode = lambda z: analyzer.model(z, rev=True)[0]
+    rows, names, families = {}, [], []
+    for name, (family, v) in directions.items():
+        v = v.to(device=z0.device, dtype=z0.dtype)
+        acc, seen = None, 0
+        for s in range(0, z0.shape[0], batch_size):
+            chunk = z0[s : s + batch_size]
+            _, jv = torch.func.jvp(decode, (chunk,), (v.expand_as(chunk),))
+            acc = jv.sum(0) if acc is None else acc + jv.sum(0)
+            seen += chunk.shape[0]
+        rows[name] = (acc / seen).detach().cpu().numpy()
+        names.append(name)
+        families.append(family)
+
+    del z0, x0
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    loadings = pd.DataFrame(rows, index=list(map(str, adata.var_names))).T
+    meta = pd.DataFrame({"family": families}, index=names)
+    meta["label"] = [n.split(DIR_SEP, 1)[1] for n in names]
+    meta["n_base_cells"] = len(idx)
+    return loadings, meta

@@ -25,6 +25,15 @@ class BaseModelConfig:
     lam_supervise: float = 0.01
     latent_per_condition: int = None
     partition_divisor: int = 8
+    # Explicit NLL weight on the condition block, overriding the `partition_divisor`
+    # formula below. None keeps the derived value, so existing configs are unchanged.
+    #
+    # The derived weight is (N_dim - means_dim)/means_dim/partition_divisor, which ties
+    # the objective to the block width: at N_dim=1937 it runs from 8.22 at means_dim=29
+    # to 0.042 at means_dim=1450, a 200x swing. `latent_per_condition` therefore changes
+    # the loss as well as the capacity, and the two cannot be told apart in a sweep.
+    # Setting this pins the weight so lpc is a pure capacity knob.
+    partition_weight: float = None
     balance_classes: bool = False
     holdout_combos: list = None
     combo_categories: list = None

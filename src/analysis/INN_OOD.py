@@ -258,6 +258,7 @@ def sample_leftout_combo_normal(
     var=None,
     dtype=torch.float32,
     observed_combos=None,
+    clamp_min=0.0,
 ):
     """OOD sampling strategy 1: draw the held-out combo's cells from an isotropic Normal
     distribution centered at its estimated latent mean (`estimate_leftout_combo_mean`),
@@ -296,7 +297,7 @@ def sample_leftout_combo_normal(
     with torch.no_grad():
         x, _ = model(z.to(dtype=dtype), rev=True)
 
-    return _combo_adata(x, holdout_combo, var=var)
+    return _combo_adata(x, holdout_combo, var=var, clamp_min=clamp_min)
 
 
 def sample_leftout_combo_shift(

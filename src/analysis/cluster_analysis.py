@@ -64,8 +64,23 @@ def plot_latent_means_umap(analyzer, umap_2d=None):
     # one plot per categorical: cats[0] = product, cats[1:] = individual keys
     cat_names = ["product"] + analyzer.conditions
 
-    for cat, name in zip(dataset.cats, cat_names):
-        cell_labels = np.array(cat)
+    # Per-cell labels come from `analyzer.adata`, NOT from `dataset.cats`. `dataset` is
+    # built from the *training* rows, so with a leave-combo-out holdout it is shorter than
+    # `analyzer.adata` (11636 vs 12383 here) - and `Z` below is computed from
+    # `analyzer.adata`, so a mask taken from `dataset.cats` indexed a longer array and
+    # raised. `dataset` is still the right source for `labels` above, which indexes the
+    # prior means and must stay the full training vocabulary.
+    obs = analyzer.adata.obs
+    conditions = list(analyzer.conditions)
+    cell_label_sets = [obs[conditions].astype(str).agg("__".join, axis=1).to_numpy()]
+    cell_label_sets += [obs[c].astype(str).to_numpy() for c in conditions]
+
+    for cell_labels, name in zip(cell_label_sets, cat_names):
+        if len(cell_labels) != len(Z_2d):
+            raise ValueError(
+                f"{len(cell_labels)} cell labels for {len(Z_2d)} latent points - "
+                "`analyzer.adata` and the embedding are out of sync."
+            )
         unique_labels = sorted(set(cell_labels))
 
         cmap = plt.cm.get_cmap("tab20", len(unique_labels))

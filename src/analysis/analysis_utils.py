@@ -307,16 +307,68 @@ class Analyzer:
 
         self.jac_dec = jac_dec
 
+    def _scoped_kwargs_data(self, sub_adata):
+        """A copy of `kwargs_data` whose `"dataset"` covers only `sub_adata`.
+
+        `compute_jacobian` draws its base points from `kwargs_data["dataset"]`, not from
+        `.adata`. Since `subset` used to pass `kwargs_data` through untouched, a subset
+        analyzer narrowed `.adata` for everything downstream while its Jacobian was still
+        taken at 256 cells sampled from every cell type and cytokine. The decoder
+        Jacobian is a *local* map, so that averaged away exactly the per-cell-type
+        differences a subset is created to isolate.
+
+        The category vocabulary is taken from the parent dataset instead of being
+        re-inferred from the surviving rows. Consumers index `model.means` by that
+        ordering (`cluster_analysis.plot_pairwise_distances`, `logistic_regression`), so
+        a vocabulary rebuilt from a filtered slice would shift every index past the first
+        absent combo - the same silent misindexing `get_condition_vocab` exists to
+        prevent.
+
+        Returns `kwargs_data` unchanged when there is nothing to scope by (no conditions,
+        or a parent dataset carrying no category info).
+        """
+        parent = self.kwargs_data.get("dataset")
+        if self.conditions is None or getattr(parent, "cats", None) is None:
+            return self.kwargs_data
+
+        combo_categories = list(parent.cats[0].categories)
+        condition_categories = {
+            key: list(parent.cats[1 + i].categories) for i, key in enumerate(self.conditions)
+        }
+
+        loader = self.kwargs_data.get("train_dataloader")
+        batchsize = getattr(loader, "batch_size", None) or 1024
+
+        scoped = dict(self.kwargs_data)
+        # `counts` mirrors how the parent dataset was built; the notebooks pass
+        # use_counts=False, so that is the default. A counts-trained model must set
+        # kwargs_data["counts"] = True or this reads .X where the parent read
+        # .layers["counts"].
+        scoped["dataset"], _ = prepare_data(
+            sub_adata,
+            batchsize,
+            self.device,
+            self.dtype,
+            label_key=self.conditions,
+            counts=self.kwargs_data.get("counts", False),
+            shuffle=False,
+            combo_categories=combo_categories,
+            condition_categories=condition_categories,
+        )
+        return scoped
+
     def subset(self, covariates, keys, use_noise=False):
         _, mask = filter_xdata(self.adata, covariates=covariates, keys=keys, device=self.device)
 
         if self.latent_sort is None and self.conditions is not None:
             self.compute_jacobian(use_noise=use_noise)
 
+        sub_adata = self.adata[mask]
+
         return Analyzer(
-            self.adata[mask],
+            sub_adata,
             self.model,
-            self.kwargs_data,
+            self._scoped_kwargs_data(sub_adata),
             self.labels_key,
             self.control_label,
             self.plot_dir,

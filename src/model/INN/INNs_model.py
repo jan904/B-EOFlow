@@ -178,7 +178,9 @@ class ModelWithMixturePrior(nn.Module):
                 # `--latent_per_condition 4` widen the block to 4*198 = 792 on a
                 # factorized run whose learned means spanned an effective rank of 28 -
                 # 764 dims of slack, and a partition weight computed off the wrong width.
-                self.means_dim = 2 * int(sum(condition_shapes))
+                if latent_per_condition is None:
+                    latent_per_condition = 2
+                self.means_dim = latent_per_condition * int(sum(condition_shapes))
             elif latent_per_condition is not None:
                 self.means_dim = latent_per_condition * n_components
 
