@@ -72,6 +72,13 @@ class OODProbe:
         self.combo_id = self.target_idx
         self.label = label(combo)
 
+        # A hybrid prior holds one mean per treatment level (11), not one per combo (198),
+        # and its flow is conditioned on the cell type. The probe is built before it sees a
+        # model, so keep the *names* and resolve them against whatever model is scored.
+        self.treatment = str(combo[condition_key])
+        self.control_level = str(control_label)
+        self.cell_type = str(combo[cell_type_key])
+
         real_np = self.real.numpy()
         self.real_delta = real_np.mean(0) - self.control.numpy().mean(0)
         self.top = np.argsort(-np.abs(self.real_delta))[:top_n]
@@ -93,17 +100,35 @@ class OODProbe:
         control = self.control.to(device)
 
         means = model.means.detach()
-        shift = means[self.target_idx] - means[self.control_idx]
 
-        z_control, _ = model(control, c=None, rev=False)
-        x_pred, _ = model(z_control + shift, rev=True)
+        # index the means the way this model is parameterised, and hand the flow the
+        # condition it was trained with. Both are no-ops for a mixture model.
+        if getattr(model, "condition_type", None) == "hybrid":
+            from src.analysis.INN_OOD import flow_condition_for
+
+            soft = list(getattr(model, "soft_categories", None) or [])
+            for lvl in (self.treatment, self.control_level):
+                if lvl not in soft:
+                    raise ValueError(f"level {lvl!r} not among the model's soft categories {soft}")
+            target_id, control_id = soft.index(self.treatment), soft.index(self.control_level)
+            c_ctrl = flow_condition_for(model, self.cell_type, control.shape[0], device)
+            c_real = flow_condition_for(model, self.cell_type, real.shape[0], device)
+        else:
+            target_id, control_id = self.target_idx, self.control_idx
+            c_ctrl = c_real = None
+
+        shift = means[target_id] - means[control_id]
+
+        z_control, _ = model(control, c=c_ctrl, rev=False)
+        x_pred, _ = model(z_control + shift, c=c_ctrl, rev=True)
         pred = torch.clamp(x_pred, min=0.0)
 
-        # nearest-mean assignment for the real cells (198-way, chance 1/K)
-        z_real, _ = model(real, c=None, rev=False)
+        # nearest-mean assignment for the real cells - 198-way for a mixture prior
+        # (chance 1/K), 11-way for a hybrid one, since its means index treatments
+        z_real, _ = model(real, c=c_real, rev=False)
         md = model.means_active.shape[1]
         dist = torch.cdist(z_real[:, :md], means[:, :md])
-        accuracy = float((dist.argmin(1) == self.combo_id).float().mean())
+        accuracy = float((dist.argmin(1) == target_id).float().mean())
 
         value = float(mmd(real, pred, sigma=self.sigma, unbiased=True))
 

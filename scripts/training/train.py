@@ -96,7 +96,14 @@ def parse_args():
     parser.add_argument("--ood_probe_every", type=int, default=50)
     parser.add_argument("--validation", action="store_true")
     parser.add_argument("--test_size", type=float, default=0.0)
-    parser.add_argument("--condition_type", type=str, default=None, choices=["mixture", "normal"])
+    parser.add_argument(
+        "--condition_type", type=str, default=None,
+        choices=["mixture", "normal", "hybrid"],
+    )
+    # hybrid only: the condition handed to the flow itself. The other one keeps a
+    # mixture mean, so its effect stays a single shared latent translation. Unset ->
+    # the non-control condition, i.e. cell type when --control_condition is cytokine.
+    parser.add_argument("--hard_condition", type=str, default=None)
     parser.add_argument("--train_means", action="store_true")
     parser.add_argument("--lr_means", type=float, default=5e-4)
     parser.add_argument(
@@ -342,6 +349,16 @@ def main():
                         model_path += "_empirical"
                         output_dir_path += "_empirical"
 
+    # Same reasoning as `_factorized` below, one step earlier: a hybrid prior holds one
+    # mean per treatment level (11) where a mixture prior holds one per combo (198), and
+    # its flow is conditioned while the mixture flow is not. Neither can load the other.
+    # Hybrid deliberately does not pass --factorize_means, so without this it would land on
+    # the *free-means* mixture path - identical in every other component - and the
+    # resume-if-exists branch would try to load a structurally incompatible checkpoint.
+    if args.condition_type == "hybrid":
+        model_path += "_hybrid"
+        output_dir_path += "_hybrid"
+
     # The prior parameterization has to be part of the path: factorized and free-means
     # checkpoints are structurally incompatible but every other path component is
     # identical, so without this a factorized run resolves to an existing free-means
@@ -475,6 +492,18 @@ def main():
                 "the factorized prior's treatment embedding, relative to the pinned control."
             )
 
+        # `update_means_epoch` - the empirical fallback when the means are not trained by
+        # gradient - is indexed by combo (c[0], 198-wide) and is only reached under
+        # `condition_type == "mixture"`. A hybrid prior has one mean per treatment level,
+        # so that path is both wrong for it and unreachable: without --train_means its
+        # means would simply stay at their initialization for the whole run, silently.
+        if args.condition_type == "hybrid" and not args.train_means:
+            raise SystemExit(
+                "--condition_type hybrid needs --train_means: its means are learned by "
+                "gradient, and the empirical update (update_means_epoch) is combo-indexed "
+                "so it does not apply. Without it the means never leave initialization."
+            )
+
         model_config = ModelConfig(
             N_dim=N_dim,
             condition_shapes=condition_shapes,
@@ -485,6 +514,7 @@ def main():
             pre_normalize=True,
             normalize=True,
             condition_type=args.condition_type,
+            hard_condition=args.hard_condition,
             trainable_means=args.train_means,
             lr_means=args.lr_means,
             means_seperation=args.means_seperation,

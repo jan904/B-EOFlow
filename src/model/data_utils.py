@@ -2,6 +2,7 @@ import scanpy as sc
 import anndata as ad
 import numpy as np
 import torch
+from types import SimpleNamespace
 
 import requests
 import os
@@ -420,22 +421,57 @@ def get_condition_vocab(adata, conditions):
 
 
 def create_latent_adata(
-    adata, flow, device, conditions=None, condition_type=None, dtype=torch.float32
+    adata,
+    flow,
+    device,
+    conditions=None,
+    condition_type=None,
+    dtype=torch.float32,
+    combo_categories=None,
+    condition_categories=None,
+    hard_condition=None,
+    control_condition=None,
 ):
     if hasattr(adata.X, "toarray"):
         X = adata.X.toarray()
     else:
         X = adata.X.copy()
 
+    # label_key=conditions, not None: "normal" and "hybrid" feed a condition to the flow,
+    # and without it `y_batch` is empty so the flow silently encodes unconditioned - a
+    # different function from the one that was trained, with no error raised.
+    needs_condition = conditions is not None and condition_type in ("normal", "hybrid")
     dataset, dataloader = prepare_data(
-        adata, batchsize=1024, device=device, dtype=dtype, shuffle=False
+        adata,
+        batchsize=1024,
+        device=device,
+        dtype=dtype,
+        shuffle=False,
+        label_key=list(conditions) if needs_condition else None,
+        combo_categories=combo_categories,
+        condition_categories=condition_categories,
     )
+
+    hard_factor = 0
+    if condition_type == "hybrid":
+        from src.model.INN.INNs_model import _resolve_hard_factor, hybrid_condition_split
+
+        hard_factor = _resolve_hard_factor(
+            SimpleNamespace(
+                condition_type="hybrid",
+                conditions=list(conditions),
+                hard_condition=hard_condition,
+                control_condition=control_condition,
+            )
+        )
 
     z_latent = []
     for X_batch, y_batch in dataloader:
         c = None
-        if conditions is not None and condition_type == "normal":
+        if needs_condition:
             c = [cond.to(device=device, dtype=dtype) for cond in y_batch]
+            if condition_type == "hybrid":
+                c, _ = hybrid_condition_split(c, hard_factor)
         X_batch = X_batch.to(device)
         with torch.no_grad():
             z_batch, _ = flow(X_batch, c=c, rev=False)

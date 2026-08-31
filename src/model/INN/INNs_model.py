@@ -89,6 +89,10 @@ class ModelWithMixturePrior(nn.Module):
         control_level=None,
         treatment_gain=False,
         partition_means=True,
+        hard_factor=None,
+        hard_levels=None,
+        hard_categories=None,
+        soft_categories=None,
     ):
         """`combo_index` (with `condition_shapes`) switches the mixture prior from one
         free mean per combo to a **factorized** one:
@@ -143,10 +147,30 @@ class ModelWithMixturePrior(nn.Module):
         self.means_dim = N_dim
         self.N_dim = N_dim
         self.factorized = False
+        # what `flow_condition` dispatches on. Stored rather than re-derived so every
+        # evaluation path asks the loaded model what it needs, instead of a caller
+        # guessing from a config that may not be to hand.
+        self.condition_type = condition_type
+        self.hard_factor = hard_factor
+        self.hard_levels = hard_levels
+        # level names of the hard condition, in the order their one-hot was built with.
+        # Taken from the pinned vocabulary rather than re-inferred from whatever rows an
+        # evaluation adata happens to hold, so a filtered adata cannot shift the indices.
+        self.hard_categories = list(hard_categories) if hard_categories else None
+        # level names of the soft condition, in the order `means` rows are indexed by
+        self.soft_categories = list(soft_categories) if soft_categories else None
 
-        if condition_type == "mixture":
+        # "hybrid" builds the same prior block as "mixture", with two differences set up by
+        # `get_INN`: the flow is conditioned on the hard condition, and `n_components` is
+        # the number of *soft*-condition levels rather than of combos. `combo_index` is
+        # left None so the prior is a free mean per soft level - with one level per
+        # cytokine there is nothing to factorize, and the cytokine shift is shared across
+        # cell types by construction because no cell-type term exists.
+        if condition_type in ("mixture", "hybrid"):
             if n_components is None:
-                raise ValueError("n_components must be specified for mixture condition type.")
+                raise ValueError(
+                    f"n_components must be specified for condition type {condition_type!r}."
+                )
 
             self.factorized = combo_index is not None
             if self.factorized and condition_shapes is None:
@@ -463,6 +487,26 @@ class ModelWithMixturePrior(nn.Module):
         out[: self.means_dim] = b
         return out
 
+    def flow_condition(self, levels, device=None, dtype=torch.float32):
+        """Condition list for the coupling blocks, or `None` when the flow is unconditioned.
+
+        `None` for every `condition_type` except "hybrid", so a mixture model's evaluation
+        path is exactly what it was - callers can pass the result straight through without
+        branching. For "hybrid" it returns `[one_hot(levels, n_hard_levels)]`, the hard
+        condition the flow was trained with.
+
+        `levels`: an int (broadcast is the caller's job) or any 1-D sequence of level
+        indices into the hard condition, one per row of the batch.
+        """
+        if getattr(self, "condition_type", None) != "hybrid":
+            return None
+        if self.hard_levels is None:
+            raise ValueError("hybrid model built without hard_levels - rebuild via get_INN")
+        idx = torch.as_tensor(levels, dtype=torch.long)
+        if device is not None:
+            idx = idx.to(device)
+        return [F.one_hot(idx.reshape(-1), int(self.hard_levels)).to(dtype)]
+
     def forward(self, x, c=None, rev=False):
         return self.model(x, c=c, rev=rev)
 
@@ -654,6 +698,50 @@ def get_linear_INN(
     return flow, optimizer_flow
 
 
+def _resolve_hard_factor(config):
+    """Index into `config.conditions` of the condition the flow is conditioned on.
+
+    Only meaningful for `condition_type == "hybrid"`; returns 0 otherwise so callers can
+    read it unconditionally. `hard_condition=None` resolves to the non-control condition -
+    with `control_condition="cytokine"` that is the cell type, the intended default: the
+    cell type becomes a hard condition handed to the flow, and the cytokine keeps a prior
+    mean so its effect stays one shared latent translation.
+    """
+    conditions = list(getattr(config, "conditions", None) or [])
+    if getattr(config, "condition_type", None) != "hybrid":
+        return 0
+    if len(conditions) != 2:
+        raise ValueError(
+            f"condition_type='hybrid' needs exactly 2 conditions, got {conditions}. One is "
+            "fed to the flow, the other keeps a mixture mean."
+        )
+    hard = getattr(config, "hard_condition", None)
+    if hard is None:
+        control = getattr(config, "control_condition", None)
+        if control is None:
+            raise ValueError(
+                "condition_type='hybrid' needs hard_condition, or control_condition so the "
+                "other condition can be taken as the hard one."
+            )
+        if control not in conditions:
+            raise ValueError(f"control_condition {control!r} not in conditions {conditions}")
+        hard = next(c for c in conditions if c != control)
+    if hard not in conditions:
+        raise ValueError(f"hard_condition {hard!r} not in conditions {conditions}")
+    return conditions.index(hard)
+
+
+def hybrid_condition_split(c, hard_factor):
+    """`(c_model, c_prior)` from the dataset's condition list.
+
+    `AdataDataset` yields `c = [combo_onehot, cond0_onehot, cond1_onehot]` in `conditions`
+    order, so factor `i` is at `c[1 + i]`. Single source of truth for the split, shared by
+    the training loss and every inference path - the two reading it differently would put
+    the encoder and the prior in different frames without raising anything.
+    """
+    return [c[1 + hard_factor]], c[1 + (1 - hard_factor)]
+
+
 def get_INN(config):
     flow = Ff.SequenceINN(config.N_dim)
 
@@ -667,13 +755,23 @@ def get_INN(config):
             layers=config.n_hidden_layers,
         )
 
+    # Which condition, if any, the coupling blocks see.
+    #   mixture -> none; conditioning is entirely through the prior means.
+    #   normal  -> all of them; there is no mixture prior.
+    #   hybrid  -> only the hard condition. The soft one keeps a prior mean, so its effect
+    #              stays one shared latent translation while the flow may warp each hard
+    #              level separately - which is what lets it Gaussianize each cell type in
+    #              its own coordinates instead of forcing one map to serve all of them.
+    hard_factor = _resolve_hard_factor(config)
     if config.condition_shapes is None:
         cond = None
         cond_shape = None
     elif config.condition_type == "mixture":
         cond = None
         cond_shape = None
-
+    elif config.condition_type == "hybrid":
+        cond = 0
+        cond_shape = [int(config.condition_shapes[hard_factor])]
     else:
         cond = 0
         cond_shape = config.condition_shapes
@@ -736,6 +834,11 @@ def get_INN(config):
             n_components = config.condition_shapes[0]
         else:
             n_components = config.n_clusters
+    elif config.condition_type == "hybrid":
+        # one mean per level of the soft condition (11 cytokines), not per combo: the hard
+        # condition is handled by the flow, so no cell-type term exists to compose with.
+        soft_factor = 1 - hard_factor
+        n_components = int(config.condition_shapes[soft_factor])
 
     combo_index = None
     factor_shapes = None
@@ -807,6 +910,22 @@ def get_INN(config):
         control_factor=control_factor,
         control_level=control_level,
         treatment_gain=treatment_gain,
+        hard_factor=hard_factor if config.condition_type == "hybrid" else None,
+        hard_levels=(
+            int(config.condition_shapes[hard_factor])
+            if config.condition_type == "hybrid" and config.condition_shapes
+            else None
+        ),
+        hard_categories=(
+            list((config.condition_categories or {}).get(config.conditions[hard_factor], []))
+            if config.condition_type == "hybrid" and config.conditions
+            else None
+        ),
+        soft_categories=(
+            list((config.condition_categories or {}).get(config.conditions[1 - hard_factor], []))
+            if config.condition_type == "hybrid" and config.conditions
+            else None
+        ),
         # The flag now controls whether the latent space is partitioned at all: without
         # it the means are full width, with it they are restricted to the condition block
         # the partition loss reweights. Compared against "partition" specifically rather

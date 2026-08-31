@@ -25,6 +25,12 @@ class BaseModelConfig:
     lam_supervise: float = 0.01
     latent_per_condition: int = None
     partition_divisor: int = 8
+    # condition_type="hybrid" only: which condition is fed to the flow itself (the
+    # "hard" condition) instead of being represented by a prior mean. The other one
+    # keeps a mixture mean, so its effect stays a single shared latent translation.
+    # None resolves to the non-control condition (cell type, when control_condition
+    # is the cytokine), which is the intended default.
+    hard_condition: str = None
     # Explicit NLL weight on the condition block, overriding the `partition_divisor`
     # formula below. None keeps the derived value, so existing configs are unchanged.
     #
@@ -51,7 +57,7 @@ class BaseModelConfig:
         if self.condition_type is not None and self.condition_shapes is None:
             raise ValueError("condition_shapes must be set when condition_type is provided.")
 
-        valid_condition_types = {"mixture", "normal", None}  # add yours
+        valid_condition_types = {"mixture", "normal", "hybrid", None}  # add yours
         if self.condition_type not in valid_condition_types:
             raise ValueError(
                 f"condition_type must be one of {valid_condition_types}, got '{self.condition_type}'."

@@ -121,6 +121,17 @@ def load_checkpoint_model(path, device):
         except Exception as err:  # optimizer/param-group mismatch on old checkpoints
             print(f"  ! could not restore the eval iterate ({err}); using saved weights")
 
+    # Every prior-geometry routine below indexes `means` by combo (198 rows) - see
+    # prior_geometry / treatment_shift_consistency. A hybrid prior holds one mean per
+    # treatment level (11) and its flow is conditioned, so those indices are wrong and the
+    # encodes here would run unconditioned. Fail rather than report plausible nonsense.
+    if getattr(model, "condition_type", None) == "hybrid":
+        raise NotImplementedError(
+            f"{path}: eval_checkpoint.py does not support condition_type='hybrid'. Its "
+            "prior-geometry metrics are indexed by combo and its encodes pass no "
+            "condition; both are wrong for a hybrid model."
+        )
+
     model.eval().to(device)
     return model, checkpoint, config
 

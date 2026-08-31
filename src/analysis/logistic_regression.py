@@ -169,8 +169,31 @@ def generate_counterfactuals(analyzer, key):
     source_label_of = [c.split("__")[label_pos] for c in cats]
 
     normal_conditioning = analyzer.condition_type == "normal"
+    hybrid_conditioning = analyzer.condition_type == "hybrid"
     if not normal_conditioning:
         means = analyzer.model.means.detach().to(device=analyzer.device, dtype=analyzer.dtype)
+
+    hard_factor = key_soft_level = None
+    if hybrid_conditioning:
+        from src.model.INN.INNs_model import _resolve_hard_factor
+        from types import SimpleNamespace
+
+        hard_factor = _resolve_hard_factor(
+            SimpleNamespace(
+                condition_type="hybrid",
+                conditions=combo_order,
+                hard_condition=(combo_order[analyzer.model.hard_factor]
+                                if getattr(analyzer.model, "hard_factor", None) is not None
+                                else None),
+                control_condition=None,
+            )
+        )
+        if combo_order[1 - hard_factor] != analyzer.labels_key:
+            raise ValueError(
+                f"generate_counterfactuals shifts '{analyzer.labels_key}', but on this "
+                f"hybrid model that is the hard condition. Nothing to shift in the prior."
+            )
+        key_soft_level = dataset.cats[1 + (1 - hard_factor)].categories.get_loc(key)
 
     all_x_cf = []
     all_z_cf = []
@@ -213,6 +236,21 @@ def generate_counterfactuals(analyzer, key):
 
                 z_cf = z_batch
                 x_cf, _ = analyzer.model(z_cf, c=c_target, rev=True)
+            elif hybrid_conditioning:
+                # The flow is conditioned on the hard condition (cell type), which a
+                # cytokine counterfactual does not change - so the same `c` is used to
+                # encode and to decode. The prior holds one mean per *soft* level (11
+                # cytokines), not one per combo, so the shift is indexed by the soft
+                # one-hot rather than by `c_batch[0]`.
+                c_hard = [c_batch[1 + hard_factor]]
+                z_batch, _ = analyzer.model(x_batch, c=c_hard, rev=False)
+
+                soft_now = torch.argmax(c_batch[1 + (1 - hard_factor)], dim=1)  # (B,)
+                soft_target = torch.full_like(soft_now, key_soft_level)
+                mean_shift = means[soft_target] - means[soft_now]
+
+                z_cf = z_batch + mean_shift
+                x_cf, _ = analyzer.model(z_cf, c=c_hard, rev=True)
             else:
                 z_batch, _ = analyzer.model(x_batch, rev=False)
 

@@ -147,6 +147,46 @@ def _combo_adata(x, holdout_combo, var=None, clamp_min=0.0):
     )
 
 
+
+def flow_condition_for(model, level, n, device=None, dtype=torch.float32):
+    """Hard-condition one-hot for `n` rows all at `level`, or None.
+
+    None for a mixture model, so every existing call is unchanged. A hybrid flow was
+    trained conditioned on the cell type, so encoding or decoding without it would be a
+    different function from the trained one - silently, since the shapes still line up.
+    Levels come from the model's pinned `hard_categories`, not from the evaluation adata.
+    """
+    if getattr(model, "condition_type", None) != "hybrid":
+        return None
+    cats = list(getattr(model, "hard_categories", None) or [])
+    if not cats:
+        raise ValueError(
+            "hybrid model has no hard_categories - rebuild it through get_INN with "
+            "condition_categories set, so its levels can be one-hot encoded."
+        )
+    if level not in cats:
+        raise ValueError(f"level {level!r} not among the model's hard categories {cats}")
+    return model.flow_condition([cats.index(level)] * int(n), device=device, dtype=dtype)
+
+
+def hybrid_treatment_shift(model, treatment, control_label):
+    """Latent shift for a hybrid model: a plain difference of two soft-condition means.
+
+    No averaging over cell types, unlike `_average_treatment_shift`: a hybrid prior has
+    one mean per treatment level and no cell-type term at all, so the shift is exact and
+    identical in every cell type by construction. The cell type is carried by the flow's
+    condition, not by the mean.
+    """
+    soft = list(getattr(model, "soft_categories", None) or [])
+    if not soft:
+        raise ValueError("hybrid model has no soft_categories - rebuild it through get_INN")
+    for level in (treatment, control_label):
+        if level not in soft:
+            raise ValueError(f"level {level!r} not among the model's soft categories {soft}")
+    means = model.means.detach()
+    return means[soft.index(treatment)] - means[soft.index(control_label)]
+
+
 def estimate_leftout_combo_mean(
     model,
     combo_categories,
@@ -200,6 +240,15 @@ def estimate_leftout_combo_mean(
             f"Held-out combo '{target_label}' is not in combo_categories; "
             "make sure the vocabulary was built from the full pre-holdout adata."
         )
+
+    if getattr(model, "condition_type", None) == "hybrid":
+        # A hybrid prior holds one mean per treatment level and no cell-type term - the
+        # cell type is the flow's condition, not part of the mean. So the "combo mean" is
+        # simply that treatment's mean, exact for a held-out combo like any other.
+        soft = list(getattr(model, "soft_categories", None) or [])
+        if target_treatment not in soft:
+            raise ValueError(f"{target_treatment!r} not among soft categories {soft}")
+        return model.means[soft.index(target_treatment)].detach()
 
     if getattr(model, "factorized", False):
         # Nothing to estimate: mu(held-out combo) = a_cell_type + b_cytokine, and both
@@ -295,7 +344,10 @@ def sample_leftout_combo_normal(
     )
 
     with torch.no_grad():
-        x, _ = model(z.to(dtype=dtype), rev=True)
+        c = flow_condition_for(
+            model, holdout_combo[cell_type_key], z.shape[0], z.device, dtype
+        )
+        x, _ = model(z.to(dtype=dtype), c=c, rev=True)
 
     return _combo_adata(x, holdout_combo, var=var, clamp_min=clamp_min)
 
@@ -335,7 +387,9 @@ def sample_leftout_combo_shift(
             "The provided holdout combo is already at the control label; no shift is needed."
         )
 
-    if getattr(model, "factorized", False):
+    if getattr(model, "condition_type", None) == "hybrid":
+        shift = hybrid_treatment_shift(model, target_treatment, control_label)
+    elif getattr(model, "factorized", False):
         # The shift is just the difference between two prior means the model already
         # holds - no 17-way average of per-cell-type differences to estimate, because
         # the treatment factor is shared across cell types by construction.
@@ -392,9 +446,12 @@ def sample_leftout_combo_shift(
     shift = shift.to(device=device, dtype=dtype)
 
     with torch.no_grad():
-        z_control, _ = model(x_control, rev=False)
+        c = flow_condition_for(
+            model, holdout_combo[cell_type_key], x_control.shape[0], x_control.device, dtype
+        )
+        z_control, _ = model(x_control, c=c, rev=False)
         z_cf = z_control + shift
-        x_cf, _ = model(z_cf, rev=True)
+        x_cf, _ = model(z_cf, c=c, rev=True)
 
     return _combo_adata(x_cf, holdout_combo, var=adata.var, clamp_min=clamp_min)
 

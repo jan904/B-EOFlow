@@ -33,6 +33,13 @@ def get_jacobian(
             c_model = c
         elif condition_type == "mixture":
             c_model = None
+        elif condition_type == "hybrid":
+            # the flow saw only the hard condition during training; the Jacobian has to be
+            # taken through the same function
+            from src.model.INN.INNs_model import hybrid_condition_split
+
+            hard_factor = getattr(model, "hard_factor", None) or 0
+            c_model, _ = hybrid_condition_split(c, hard_factor)
 
     if z_input is not None:
         z = z_input
@@ -201,6 +208,21 @@ def get_manifold_entropy(
             c_prior = None
         elif condition_type == "mixture":
             c_prior = c[0]
+        elif condition_type == "hybrid":
+            # A hybrid prior is indexed by the soft condition, not by combo. Left as None
+            # this silently scored the entropy against a standard normal instead of the
+            # mixture - no error, just the wrong prior. `c` is
+            # [combo, cond0, cond1], so pick the one-hot whose width matches the number
+            # of components; the two conditions have different level counts, so this is
+            # unambiguous (and says so if it ever is not).
+            k = None if means is None else means.shape[0]
+            match = [t for t in c[1:] if k is not None and t.shape[1] == k]
+            if len(match) != 1:
+                raise ValueError(
+                    f"cannot identify the soft condition for a hybrid prior with {k} "
+                    f"components among one-hots of width {[t.shape[1] for t in c[1:]]}"
+                )
+            c_prior = match[0]
 
     assert not (
         condition_type == "mixture" and means is None

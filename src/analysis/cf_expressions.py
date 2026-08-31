@@ -948,7 +948,18 @@ def sample_from_means(analyzer, sigma=1.0):
     z = torch.tensor(np.concatenate(all_z, axis=0), dtype=analyzer.dtype, device=analyzer.device)
 
     with torch.no_grad():
-        x, _ = analyzer.model(z, rev=True)
+        # a hybrid flow decodes per cell type; `all_cell_types` already holds one entry per
+        # sampled row, in the same order as `z`. None for a mixture model.
+        c = None
+        if getattr(analyzer.model, "condition_type", None) == "hybrid":
+            cats = list(getattr(analyzer.model, "hard_categories", None) or [])
+            missing = sorted(set(all_cell_types) - set(cats))
+            if missing:
+                raise ValueError(f"cell types not in the model's hard_categories: {missing}")
+            c = analyzer.model.flow_condition(
+                [cats.index(t) for t in all_cell_types], device=z.device, dtype=z.dtype
+            )
+        x, _ = analyzer.model(z, c=c, rev=True)
 
     adata_sampled = ad.AnnData(
         X=x.cpu().numpy(),

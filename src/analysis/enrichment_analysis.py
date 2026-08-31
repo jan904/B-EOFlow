@@ -313,6 +313,14 @@ def latent_directions(
     if cell_type_key is None:
         cell_type_key = next(k for k in conditions if k != condition_key)
 
+    if getattr(model, "condition_type", None) == "hybrid":
+        raise NotImplementedError(
+            "latent_directions indexes model.means by combo, but a hybrid prior holds one "
+            "mean per treatment level and has no cell-type term at all - so the "
+            "`cell_type` family of directions does not exist for it. Use "
+            "INN_OOD.hybrid_treatment_shift for its treatment directions."
+        )
+
     means = model.means.detach()
     order = list(conditions)
     levels = {c: sorted({lbl.split("__")[i] for lbl in combo_categories})
@@ -402,6 +410,14 @@ def direction_gene_loadings(analyzer, directions, n_cells=64, batch_size=64, see
         raise ValueError(
             f"No '{analyzer.control_label}' cells in this analyzer's adata - the "
             "directions are displacements away from control, so there is no base point."
+        )
+
+    if getattr(analyzer.model, "condition_type", None) == "hybrid":
+        raise NotImplementedError(
+            "direction_gene_loadings does not support a hybrid model: its flow is conditioned on the hard "
+            "condition, and encoding without that condition is a different function from "
+            "the trained one - silently, since the shapes still line up. Pass the "
+            "condition through before using this on a hybrid checkpoint."
         )
 
     idx = np.flatnonzero(mask)

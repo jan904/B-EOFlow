@@ -141,16 +141,22 @@ def net_coverage(net, var_names):
     ).fillna({"n_covered": 0}).astype(int).sort_values("n_covered", ascending=False)
 
 
-def _encode_decode_shift(model, x_ctrl, shift, batch_size=512, clamp_min=0.0):
+def _encode_decode_shift(model, x_ctrl, shift, batch_size=512, clamp_min=0.0, cell_type=None):
     """Encode control cells once, add the latent shift, decode. Batched so a large
     control pool cannot blow the 16 GB allocations this repo sometimes runs on.
+
+    `cell_type` is only read by a hybrid model, whose flow was conditioned on it;
+    `flow_condition_for` returns None for a mixture model so this is unchanged there.
     """
+    from src.analysis.INN_OOD import flow_condition_for
+
     outs = []
     with torch.no_grad():
         for start in range(0, x_ctrl.shape[0], batch_size):
             chunk = x_ctrl[start : start + batch_size]
-            z, _ = model(chunk, rev=False)
-            x_cf, _ = model(z + shift, rev=True)
+            c = flow_condition_for(model, cell_type, chunk.shape[0], chunk.device, chunk.dtype)
+            z, _ = model(chunk, c=c, rev=False)
+            x_cf, _ = model(z + shift, c=c, rev=True)
             outs.append(x_cf)
     x_cf = torch.cat(outs, dim=0)
     if clamp_min is not None:
@@ -239,10 +245,22 @@ def compute_signatures(
             # difference of prior means, not model.treatment_shift: it needs no gauge to
             # be pinned and stays correct under treatment_gain, where the shift is
             # w_ct * b_cy and no single treatment vector serves every cell type.
-            shift = (means[idx] - means[ctrl_idx]).to(device=device, dtype=dtype)
+            #
+            # A hybrid prior is indexed by treatment level (11), not by combo (198) - the
+            # cell type is the flow's condition, not part of the mean - so it needs the
+            # same difference taken over its own vocabulary.
+            if getattr(model, "condition_type", None) == "hybrid":
+                from src.analysis.INN_OOD import hybrid_treatment_shift
+
+                shift = hybrid_treatment_shift(model, cy, control_label).to(
+                    device=device, dtype=dtype
+                )
+            else:
+                shift = (means[idx] - means[ctrl_idx]).to(device=device, dtype=dtype)
 
             x_cf = _encode_decode_shift(
-                model, x_ctrl, shift, batch_size=batch_size, clamp_min=clamp_min
+                model, x_ctrl, shift, batch_size=batch_size, clamp_min=clamp_min,
+                cell_type=ct,
             )
             key = _row_key(cy, ct)
             pred_rows[key] = x_cf.mean(dim=0).cpu().numpy() - ctrl_mean

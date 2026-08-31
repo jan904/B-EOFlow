@@ -127,6 +127,14 @@ def evaluate_de_effects_gt(analyzer, perturbations, de_dfs, de_sig_dfs):
 def _reconstruct_flow(
     analyzer, dataloader, keep_dim, use_noise, perm_module=None, select_module=None
 ):
+    if getattr(analyzer.model, "condition_type", None) == "hybrid":
+        raise NotImplementedError(
+            "This reconstruction path does not support a hybrid model: its flow is conditioned on the hard "
+            "condition, and encoding without that condition is a different function from "
+            "the trained one - silently, since the shapes still line up. Pass the "
+            "condition through before using this on a hybrid checkpoint."
+        )
+
     x_recon = []
     for x_batch, _ in dataloader:
         x_batch = x_batch.to(device=analyzer.device, dtype=analyzer.dtype)

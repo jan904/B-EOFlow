@@ -4,6 +4,8 @@ from torch.autograd import grad
 from torch.autograd.forward_ad import dual_level, make_dual, unpack_dual
 import numpy as np
 
+from src.model.INN.INNs_model import _resolve_hard_factor, hybrid_condition_split
+
 
 class DimensionSampler:
     def __init__(self, N_dim, device):
@@ -106,6 +108,11 @@ def get_loss(
         elif model_config.condition_type == "mixture":
             c_model = None
             c_prior = c[0]
+        elif model_config.condition_type == "hybrid":
+            # flow sees the hard condition, prior means index the soft one. Uses the same
+            # helper every inference path calls, so the encoder and the prior can never end
+            # up in different frames.
+            c_model, c_prior = hybrid_condition_split(c, _resolve_hard_factor(model_config))
 
     start_ = time.time()
     use_NLL = (
