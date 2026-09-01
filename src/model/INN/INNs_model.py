@@ -88,6 +88,7 @@ class ModelWithMixturePrior(nn.Module):
         control_factor=None,
         control_level=None,
         treatment_gain=False,
+        factorize_op="add",
         partition_means=True,
         hard_factor=None,
         hard_levels=None,
@@ -141,12 +142,49 @@ class ModelWithMixturePrior(nn.Module):
         scale redundancy (scale every `w` by c, every `b` by 1/c), a flat direction that
         leaves every `mu` untouched; it costs nothing during training but means the
         magnitude of a single `w` is only interpretable against the other `w`s.
+
+        `factorize_op="multiply"` composes the same factors elementwise instead:
+
+            mu(cell_type, cytokine) = a_cell_type * b_cytokine
+
+        which is `treatment_gain` taken to its limit - there the per-cell-type response
+        was a single scalar on a shared direction, here every latent coordinate is scaled
+        on its own, so a cytokine may act along different directions in different cell
+        types while still being *one* set of parameters fitted from every cell type that
+        saw it. The OOD property is unchanged: a held-out combo has no free parameter,
+        its `a` comes from that cell type's other cytokines and its `b` from that
+        cytokine's other cell types.
+
+        The gauge is the multiplicative analogue: the control level is pinned to the
+        all-ones vector (`b - b[ctrl] + 1`) rather than to zero, so `mu(cell_type,
+        control) = a_cell_type` still reads as that cell type's control mean and `b`
+        reads as a per-coordinate response ratio. Requires `control_factor`/
+        `control_level` and exactly two factors - with the gauge unpinned, `a * b` has a
+        per-coordinate scale redundancy that makes neither factor interpretable, and with
+        more than two factors it is ambiguous which one carries the base geometry.
+
+        Note what it costs, since this is a strictly different model and not a relaxation
+        that contains the additive one: a translation `a + b` is *not* expressible as
+        `a * b'`, so this does not warm-start from an additive checkpoint (the shapes
+        match, which is exactly why they must not share a path), and latent counterfactual
+        arithmetic is no longer "add one vector": the shift from control to treatment is
+        `a_cell_type * (b - 1)`, different in every cell type. The evaluation paths that
+        take the shift as a *difference of prior means* (`INN_OOD`, `enrichment_shift`)
+        stay correct unchanged; `treatment_shift`, which returns one shared vector, does
+        not apply and raises.
         """
         super().__init__()
         self.model = model
         self.means_dim = N_dim
         self.N_dim = N_dim
         self.factorized = False
+        # `mu = a * b` instead of `a + b`; only ever True alongside `factorized`. Kept as
+        # its own attribute (and mirrored into a buffer below) because the two
+        # parameterizations have *identical* parameter shapes - nothing else in a
+        # checkpoint tells them apart.
+        self.multiplicative = False
+        if factorize_op not in ("add", "multiply"):
+            raise ValueError(f"factorize_op must be 'add' or 'multiply', got {factorize_op!r}.")
         # what `flow_condition` dispatches on. Stored rather than re-derived so every
         # evaluation path asks the loaded model what it needs, instead of a caller
         # guessing from a config that may not be to hand.
@@ -175,6 +213,11 @@ class ModelWithMixturePrior(nn.Module):
             self.factorized = combo_index is not None
             if self.factorized and condition_shapes is None:
                 raise ValueError("condition_shapes must be given alongside combo_index.")
+            if factorize_op == "multiply" and not self.factorized:
+                raise ValueError(
+                    "factorize_op='multiply' only applies to a factorized prior - there are "
+                    "no factors to multiply when every combo has a free mean."
+                )
 
             if not partition_means:
                 # No `supervise_latent_meaning`, so nothing in the loss ever treats the
@@ -255,24 +298,81 @@ class ModelWithMixturePrior(nn.Module):
                         f"({n_components}, {len(condition_shapes)})."
                     )
 
-                # One joint orthogonal basis sliced per factor, rather than initializing
-                # each factor separately: that makes the factors' subspaces mutually
-                # orthogonal, so two combos differing in exactly one factor sit
-                # `scale * sqrt(2)` = means_seperation apart and the separation rule
-                # carries over unchanged from the free-means case. (The gauge shift below
-                # is a pure translation of one block, which leaves all pairwise distances
-                # untouched.)
-                basis = torch.zeros(total_levels, self.means_dim)
-                torch.nn.init.orthogonal_(basis)
-                basis = basis * scale
+                self.multiplicative = factorize_op == "multiply"
+                if self.multiplicative:
+                    if len(condition_shapes) != 2:
+                        raise ValueError(
+                            f"factorize_op='multiply' is defined for exactly two factors "
+                            f"(the treatment and the one it modulates), got "
+                            f"{len(condition_shapes)}. With more it is ambiguous which "
+                            "factor carries the base geometry and which rescale it."
+                        )
+                    if control_factor is None or control_level is None:
+                        raise ValueError(
+                            "factorize_op='multiply' needs control_factor and control_level: "
+                            "unpinned, `a * b` has a per-coordinate scale redundancy (scale "
+                            "a column of every `a`, divide it out of every `b`), so neither "
+                            "factor means anything on its own. Pass control_condition/"
+                            "control_label on the config."
+                        )
 
-                self.factor_emb = nn.ParameterList()
-                offset = 0
-                for n_levels in condition_shapes:
-                    self.factor_emb.append(
-                        nn.Parameter(basis[offset : offset + n_levels].clone(), requires_grad=True)
-                    )
-                    offset += n_levels
+                    # The two factors play different roles, so they start differently: the
+                    # treatment factor is a *modulator* around the all-ones vector the
+                    # gauge pins its control level to, and the other factor carries the
+                    # geometry, exactly as `a` does in the additive prior.
+                    #
+                    # Random signs at amplitude sqrt(2) for the modulator, and the control
+                    # row at 0 so the gauge (`b - b[ctrl] + 1`) is a no-op at init. A
+                    # combo and its own control then sit
+                    # ||a * (b - 1)|| ~ ||a|| * rms(b - 1) = scale * sqrt(2) =
+                    # means_seperation apart - the same closest-pair spacing the additive
+                    # init gives, and the amplitude is what sets it (signs alone would
+                    # leave every treated combo a factor sqrt(2) too close to its control).
+                    # Pairs differing in both factors sit further, as they do additively;
+                    # two cell types at the same treated cytokine sit sqrt(3) further,
+                    # since the modulator stretches those differences too. The init cannot
+                    # make all three exact, and the treatment axis is the one the objective
+                    # has to resolve.
+                    self.factor_emb = nn.ParameterList()
+                    for i, n_levels in enumerate(condition_shapes):
+                        if i == control_factor:
+                            emb = torch.randint(0, 2, (n_levels, self.means_dim)).float() * 2 - 1
+                            emb = emb * math.sqrt(2.0)
+                            emb[control_level] = 0.0
+                        else:
+                            emb = torch.zeros(n_levels, self.means_dim)
+                            torch.nn.init.orthogonal_(emb)
+                            emb = emb * scale
+                        self.factor_emb.append(nn.Parameter(emb, requires_grad=True))
+                else:
+                    # One joint orthogonal basis sliced per factor, rather than initializing
+                    # each factor separately: that makes the factors' subspaces mutually
+                    # orthogonal, so two combos differing in exactly one factor sit
+                    # `scale * sqrt(2)` = means_seperation apart and the separation rule
+                    # carries over unchanged from the free-means case. (The gauge shift below
+                    # is a pure translation of one block, which leaves all pairwise distances
+                    # untouched.)
+                    basis = torch.zeros(total_levels, self.means_dim)
+                    torch.nn.init.orthogonal_(basis)
+                    basis = basis * scale
+
+                    self.factor_emb = nn.ParameterList()
+                    offset = 0
+                    for n_levels in condition_shapes:
+                        self.factor_emb.append(
+                            nn.Parameter(
+                                basis[offset : offset + n_levels].clone(), requires_grad=True
+                            )
+                        )
+                        offset += n_levels
+
+                # Mirrored into the state dict: an additive and a multiplicative prior have
+                # the same parameter names *and* shapes, so loading one into the other would
+                # otherwise succeed silently and give a completely different prior. See
+                # build_model.remap_keys, which refuses that.
+                self.register_buffer(
+                    "prior_multiplicative", torch.tensor(self.multiplicative)
+                )
 
                 self.register_buffer("combo_index", combo_index.long())
                 self.means_free = None
@@ -308,6 +408,13 @@ class ModelWithMixturePrior(nn.Module):
                     raise ValueError(
                         "treatment_gain only applies to a factorized prior - there is no "
                         "treatment embedding to scale when every combo has a free mean."
+                    )
+                if self.multiplicative:
+                    raise ValueError(
+                        "treatment_gain does not combine with factorize_op='multiply': the "
+                        "gain is a per-cell-type scalar on the treatment embedding, and a "
+                        "multiplicative prior already scales it per coordinate per cell "
+                        "type. Stacking them only adds a redundant scalar."
                     )
                 if len(condition_shapes) != 2:
                     raise ValueError(
@@ -387,20 +494,29 @@ class ModelWithMixturePrior(nn.Module):
         decomposition of the same geometry the parameters express, so that
         `factor_emb[control_factor]` reads directly as a treatment effect relative to
         control instead of an arbitrary offset.
+
+        Multiplicatively the redundancy is per-coordinate scaling rather than a shift, so
+        the pinned level goes to the *identity* of the composition: `b - b[ctrl] + 1`,
+        leaving the control level at all-ones and `b` reading as a response ratio. It is
+        still written as a subtraction (not a division) so it cannot blow up when a
+        coordinate of the control row passes through zero during training.
         """
         emb = self.factor_emb[i]
         if self.control_factor == i and self.control_level is not None:
             emb = emb - emb[self.control_level]
+            if self.multiplicative:
+                emb = emb + 1.0
         return emb
 
     @property
     def means_active(self):
         """(K, means_dim) condition-carrying block of the prior means.
 
-        Composed from the per-factor embeddings when factorized, otherwise the free
-        per-combo parameter. Kept as a single property so every consumer - the losses,
-        the `means` property, the OOD samplers - indexes means by combo id regardless of
-        how they are parameterized.
+        Composed from the per-factor embeddings when factorized (summed, or multiplied
+        elementwise under `factorize_op="multiply"`), otherwise the free per-combo
+        parameter. Kept as a single property so every consumer - the losses, the `means`
+        property, the OOD samplers - indexes means by combo id regardless of how they are
+        parameterized.
         """
         if not self.factorized:
             return self.means_free
@@ -413,6 +529,11 @@ class ModelWithMixturePrior(nn.Module):
                 # one shared treatment direction by its own amount.
                 emb = self.treatment_gain[self.combo_index[:, self.gain_factor]].unsqueeze(1) * emb
             rows.append(emb)
+        if self.multiplicative:
+            out = rows[0]
+            for emb in rows[1:]:
+                out = out * emb
+            return out
         return sum(rows)
 
     @property
@@ -457,11 +578,22 @@ class ModelWithMixturePrior(nn.Module):
         With `treatment_gain` the shift is `w_gain_level * b_level`, so it is no longer
         the same vector for every cell type and `gain_level` (the level index of the
         non-treatment factor) becomes required.
+
+        Under `factorize_op="multiply"` the treatment does not act by translation at all
+        (`mu = a * b`, so the shift is `a_cell_type * (b - 1)`), and this raises - take
+        the difference of the two prior means instead, which is what the OOD and
+        enrichment paths already do.
         """
         if not self.factorized:
             raise RuntimeError(
                 "treatment_shift requires a factorized prior; with free per-combo means "
                 "there is no single treatment vector to read off."
+            )
+        if self.multiplicative:
+            raise RuntimeError(
+                "treatment_shift does not apply to a multiplicative prior: mu = a * b, so "
+                "moving from control to a treatment shifts by a_cell_type * (b - 1), which "
+                "differs per cell type. Use the difference of the two combos' `means` rows."
             )
         factor = self.control_factor if factor is None else factor
         if factor is None:
@@ -845,6 +977,7 @@ def get_INN(config):
     control_factor = None
     control_level = None
     treatment_gain = bool(getattr(config, "treatment_gain", False))
+    factorize_op = getattr(config, "factorize_op", "add") or "add"
 
     if treatment_gain and not (
         config.condition_type == "mixture" and getattr(config, "factorize_means", False)
@@ -852,6 +985,14 @@ def get_INN(config):
         raise ValueError(
             "treatment_gain requires condition_type='mixture' with factorize_means=True - "
             "it scales the factorized prior's treatment embedding."
+        )
+
+    if factorize_op == "multiply" and not (
+        config.condition_type == "mixture" and getattr(config, "factorize_means", False)
+    ):
+        raise ValueError(
+            "factorize_op='multiply' requires condition_type='mixture' with "
+            "factorize_means=True - it is a different way of composing the same factors."
         )
 
     if config.condition_type == "mixture" and getattr(config, "factorize_means", False):
@@ -910,6 +1051,7 @@ def get_INN(config):
         control_factor=control_factor,
         control_level=control_level,
         treatment_gain=treatment_gain,
+        factorize_op=factorize_op,
         hard_factor=hard_factor if config.condition_type == "hybrid" else None,
         hard_levels=(
             int(config.condition_shapes[hard_factor])

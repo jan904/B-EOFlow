@@ -416,6 +416,7 @@ def evaluate(path, args, adata, device, rng):
     print(f"  epoch {checkpoint['epoch']} | sigma_noise {settings.get('sigma_noise')} | "
           f"lam_MTC {settings.get('lam_MTC')} | "
           f"factorize_means {getattr(config, 'factorize_means', None)} | "
+          f"factorize_op {getattr(config, 'factorize_op', 'add')} | "
           f"treatment_gain {getattr(config, 'treatment_gain', None)} | "
           f"holdouts {len(named)}: {', '.join(holdout_labels.values())}")
 
@@ -467,6 +468,7 @@ def evaluate(path, args, adata, device, rng):
     results = {"checkpoint": path, "epoch": int(checkpoint["epoch"]),
                "sigma_noise": settings.get("sigma_noise"), "lam_MTC": settings.get("lam_MTC"),
                "factorize_means": getattr(config, "factorize_means", None),
+               "factorize_op": getattr(config, "factorize_op", "add"),
                "treatment_gain": getattr(config, "treatment_gain", None),
                "prior": geo, "shift_consistency": shifts, "latent": fit, "counterfactuals": []}
 

@@ -185,6 +185,25 @@ def remap_keys(model, state_dict):
             print(f"Converted treatment_gain -> gain_log (geometric mean {geo_mean:.4f} "
                   f"folded into {emb_key}; the prior is unchanged).")
 
+    # Additive and multiplicative factorized priors have the same parameter names *and*
+    # the same shapes, so every other check here passes and the swap would go through
+    # silently on a completely different prior. `prior_multiplicative` is a buffer that
+    # exists only to make it visible; checkpoints written before it are additive.
+    ckpt_multiplicative = bool(
+        remapped_state.get("prior_multiplicative", torch.tensor(False)).item()
+    )
+    model_multiplicative = bool(getattr(model, "multiplicative", False))
+    if ckpt_multiplicative != model_multiplicative:
+        raise RuntimeError(
+            f"Checkpoint's prior composes its factors "
+            f"{'multiplicatively' if ckpt_multiplicative else 'additively'} but this model "
+            f"composes them "
+            f"{'multiplicatively' if model_multiplicative else 'additively'}. The parameters "
+            "have identical shapes, so this would load and give a different prior. Rebuild "
+            f"with factorize_op='{'multiply' if ckpt_multiplicative else 'add'}' - they are "
+            "different models, not a warm start for one another."
+        )
+
     missing, unexpected = model.load_state_dict(remapped_state, strict=False)
 
     # The prior block is the one thing that must never be silently left at init. A
@@ -223,8 +242,13 @@ def remap_keys(model, state_dict):
 
     non_prior_missing = [
         k
+        # `prior_multiplicative` among them: a checkpoint written before that buffer
+        # existed is additive, which the check above already established, and the model
+        # builds the buffer itself.
         for k in missing
-        if not k.startswith(("means", "factor_emb", "treatment_gain", "gain_log"))
+        if not k.startswith(
+            ("means", "factor_emb", "treatment_gain", "gain_log", "prior_multiplicative")
+        )
     ]
 
     if non_prior_missing:

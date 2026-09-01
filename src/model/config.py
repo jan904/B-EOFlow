@@ -97,6 +97,15 @@ class INNConfig(BaseModelConfig):
     # other cell types), so it keeps the OOD property; it only lets response *magnitude*
     # vary by cell type. Requires factorize_means and control_condition/control_label.
     treatment_gain: bool = False
+    # How the per-condition factors compose. "add" is mu = a_cell_type + b_cytokine, the
+    # additive prior everything else here is written for. "multiply" is the elementwise
+    # product mu = a_cell_type * b_cytokine, with the control level pinned to all-ones
+    # instead of zero - a per-coordinate version of treatment_gain, so the response may
+    # point somewhere different in each cell type while still being composed from factors
+    # (a held-out combo therefore stays predictable). Requires factorize_means, exactly
+    # two conditions, and control_condition/control_label; does not combine with
+    # treatment_gain. See INNs_model.ModelWithMixturePrior.
+    factorize_op: str = "add"
 
     N_blocks: int = 12
     subnet_fc: callable = None
@@ -116,6 +125,15 @@ class INNConfig(BaseModelConfig):
         super().__post_init__()
         if self.coupling_block_type not in {"GLOW", "RQS", None}:
             raise ValueError(f"Unknown coupling_block_type '{self.coupling_block_type}'.")
+        if self.factorize_op not in {"add", "multiply"}:
+            raise ValueError(
+                f"factorize_op must be 'add' or 'multiply', got '{self.factorize_op}'."
+            )
+        if self.factorize_op == "multiply" and not self.factorize_means:
+            raise ValueError(
+                "factorize_op='multiply' needs factorize_means=True - it changes how the "
+                "per-condition factors compose, and free per-combo means have none."
+            )
 
 
 @dataclass

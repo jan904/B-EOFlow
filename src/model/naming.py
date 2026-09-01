@@ -9,8 +9,8 @@ trained at `lr_means=5e-4`: the prefix was a hand-maintained string that no code
 The name carries the knobs that change *what is trained* without changing the
 checkpoint's structure, since two such runs are different results that would otherwise
 share a path and overwrite each other. Structure-changing knobs (`factorize_means`,
-`treatment_gain`) live in the directory instead - there a collision is a failed load
-rather than a bad label, so it announces itself.
+`treatment_gain`, `factorize_op`) live in the directory instead - there a collision is a
+failed load rather than a bad label, so it announces itself.
 
 Two spellings exist:
 

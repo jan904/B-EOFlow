@@ -126,6 +126,10 @@ def parse_args():
     # mu = a_cell_type + w_cell_type * b_cytokine instead of a + b: one learned scalar per
     # cell type on the treatment embedding. Needs --factorize_means and --control_condition.
     parser.add_argument("--treatment_gain", action="store_true")
+    # How the factors compose: "add" -> mu = a_cell_type + b_cytokine; "multiply" ->
+    # mu = a_cell_type * b_cytokine elementwise, with the control level pinned to ones.
+    # Needs --factorize_means and --control_condition; not combinable with --treatment_gain.
+    parser.add_argument("--factorize_op", type=str, default="add", choices=["add", "multiply"])
     parser.add_argument("--means_dim", type=int, default=None)
     # which condition is the treatment axis (its control level is the dataset's own
     # control_label); required for --factorize_means to expose a treatment shift
@@ -374,6 +378,14 @@ def main():
         model_path += "_gain"
         output_dir_path += "_gain"
 
+    # And again, for the same reason with one twist: an additive and a multiplicative
+    # factorized prior have identical parameter *shapes*, so a shared path would not even
+    # fail loudly on resume - remap_keys refuses it off a marker buffer, and this keeps it
+    # from arising.
+    if args.factorize_op == "multiply":
+        model_path += "_mult"
+        output_dir_path += "_mult"
+
     log_dir = os.path.join(output_dir_path, "logs", output_dir_name)
 
     os.makedirs(model_path, exist_ok=True)
@@ -492,6 +504,20 @@ def main():
                 "the factorized prior's treatment embedding, relative to the pinned control."
             )
 
+        if args.factorize_op == "multiply":
+            if not (args.factorize_means and args.control_condition):
+                raise SystemExit(
+                    "--factorize_op multiply needs --factorize_means and "
+                    "--control_condition: it composes the factorized prior's factors "
+                    "elementwise, with the control level pinned to all-ones."
+                )
+            if args.treatment_gain:
+                raise SystemExit(
+                    "--factorize_op multiply does not combine with --treatment_gain: it "
+                    "already scales the treatment per coordinate per cell type, which the "
+                    "gain's single scalar would only duplicate."
+                )
+
         # `update_means_epoch` - the empirical fallback when the means are not trained by
         # gradient - is indexed by combo (c[0], 198-wide) and is only reached under
         # `condition_type == "mixture"`. A hybrid prior has one mean per treatment level,
@@ -534,6 +560,7 @@ def main():
             conditions=args.conditions,
             factorize_means=args.factorize_means,
             treatment_gain=args.treatment_gain,
+            factorize_op=args.factorize_op,
             means_dim=args.means_dim,
             control_condition=args.control_condition,
             # control_label comes from load_data/load_metacells, so the pinned level is
