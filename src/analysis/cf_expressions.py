@@ -5,7 +5,7 @@ import pandas as pd
 import anndata as ad
 import scanpy as sc
 import matplotlib.pyplot as plt
-from scipy.stats import linregress
+from scipy.stats import linregress, mannwhitneyu, norm, spearmanr
 from scipy.stats import t as t_dist
 
 from src.analysis.logistic_regression import generate_counterfactuals
@@ -142,6 +142,219 @@ def effect_size_scores(predicted, truth):
         "r2": 1 - float(((predicted - truth) ** 2).sum()) / ss_truth,
         "scale": dot / ss_pred,
     }
+
+
+DE_STATISTICS = ("cohens_d", "lfc", "wilcoxon")
+
+# p below this is treated as this, so a gene the test separates completely gets a large
+# finite score instead of an infinite one. |z| tops out at ~37 there; the ordering among
+# such genes is a tie either way, which is the point `_de_scores` documents.
+_P_FLOOR = 1e-300
+
+
+def _de_scores(x, control, statistic):
+    """Signed per-gene differential-expression score of `x` against `control`.
+
+    `cohens_d` (the default) is the difference of means over the pooled standard
+    deviation, which is what makes a gene with a small but clean shift outrank one with a
+    large shift buried in variance - i.e. what a DE test would do. `lfc` is the bare
+    difference of means; in the canonical log1p space every caller puts its matrices into,
+    that is a log fold change.
+
+    `wilcoxon` is the signed z of the Mann-Whitney U test - what scanpy's
+    `rank_genes_groups` ranks by, and with it `utils.extract_top_genes` and every
+    in-distribution section of comparison.ipynb. It is here so a conclusion can be checked
+    against the conventional statistic, but on the *predictions* scored in 4.6b it measures
+    something else, and not subtly. Half of those are the real control cells plus a
+    constant vector (`Means`, `gene-space`, and any shift-strategy model that does not
+    decode). Adding a constant to a gene that is 94% zeros in the controls lifts that
+    entire tied block above itself, a near-maximal rank displacement however small the
+    constant is - so the statistic ends up ranking genes by how *zero* they are rather than
+    by how much they moved.
+
+    Measured on combo_1 (IL-2 x CD8 Memory, 34 real and 195 control metacells, 1154 genes
+    past the detection filter, prediction = controls + the gene-space shift): |z| correlates
+    **+0.97 with the control's zero fraction** and **-0.23 with the size of the shift**. Its
+    top 50 genes have a median |shift| of 0.040 where the median over all kept genes is
+    0.084, and a median control zero fraction of 94%. Overlap with the real top 50 falls
+    from 0.36 under `cohens_d` to 0.02. The much-quoted complete separation is not what
+    does this - exactly 1 of the 1154 genes is completely separated by the shift. On the
+    real cells, which are not a constant shift of the controls, the two statistics rank
+    genes almost identically (spearman 0.94), so this is specific to that class of
+    prediction. `cohens_d` divides by the spread and does not have the failure, which is
+    why it is the default.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    control = np.asarray(control, dtype=np.float64)
+    if statistic not in DE_STATISTICS:
+        raise ValueError(f"statistic must be one of {DE_STATISTICS}, got {statistic!r}.")
+
+    if statistic == "wilcoxon":
+        # z is recovered from scipy's two-sided p rather than rebuilt from U, so the tie
+        # correction - which matters enormously on data this zero-inflated - is scipy's
+        # and not a reimplementation of it. No continuity correction, matching scanpy.
+        res = mannwhitneyu(x, control, axis=0, alternative="two-sided",
+                           method="asymptotic", use_continuity=False)
+        z = -norm.ppf(np.clip(res.pvalue, _P_FLOOR, 1.0) / 2)
+        # U above its null mean means x sits above control; exactly at it means no
+        # difference at all, and np.sign sends that to a score of 0 as it should
+        return np.sign(res.statistic - x.shape[0] * control.shape[0] / 2) * z
+
+    diff = x.mean(0) - control.mean(0)
+    if statistic == "lfc":
+        return diff
+    pooled = np.sqrt((x.var(0, ddof=1) + control.var(0, ddof=1)) / 2)
+    # A gene constant in both samples has no scale to standardize by. The detection
+    # filter in `de_gene_overlap` is what keeps this from mattering - after it, a
+    # zero-variance gene is one every cell of both samples happens to agree on.
+    return np.divide(diff, pooled, out=np.zeros_like(diff), where=pooled > 0)
+
+
+def de_gene_overlap(real, control, predictions, var_names=None, top_n=50,
+                    min_detection=0.1, statistic="cohens_d", n_ceiling=30, seed=0):
+    """Do a model's own top differentially expressed genes recover the real ones?
+
+    For one held-out combo: rank genes by how strongly they respond to the treatment,
+    once from the **real** held-out cells and once from each **prediction**, always
+    against the same real control cells and with the same statistic, then compare the
+    two top-`top_n` sets.
+
+    This is the converse of `effect_size_scores`. That one fixes the gene set from the
+    real data and asks whether the predicted effect points the right way on it; this one
+    lets each model nominate its *own* genes and asks whether they are the right ones -
+    the question that matters if the model is to be used to generate hypotheses about a
+    combination nobody has run.
+
+    `real`, `control` and the values of `predictions` are (cells, genes) matrices that
+    must already be in one common space (`mmd.canonicalize`), because a fold change is
+    not comparable between count-space and log-space matrices.
+
+    `statistic` picks how a gene's response is measured - `cohens_d` (default), `lfc`, or
+    `wilcoxon`, the rank test the in-distribution sections use. Both sides of every
+    comparison always use the same one, so any of them gives a fair overlap; they differ
+    in *which* genes end up at the top, and `_de_scores` documents what the rank test
+    does to a prediction that is the control cells plus a constant. Worth running twice
+    to see whether the ranking of models depends on the choice.
+
+    Genes detected in fewer than `min_detection` of the real cells *and* fewer than that
+    of the control cells are dropped before ranking. Without it the top-k fills up with
+    genes that are structurally silent in this cell type, where the entire signal is a
+    decoder's numerical noise - the same restriction, and the same reason, as
+    `plot_gene_violins`' `min_detection`. The union is what is tested, not the
+    intersection, so a gene switched on from zero by the treatment is kept.
+
+    Returns `(scores, genes, ceiling)`:
+
+    * `scores`: {model: {`overlap`, `overlap_signed`, `spearman`, `random`, `n_genes`,
+      `k`}}. `overlap` is the fraction of the real top-k the model also puts in its
+      top-k; `overlap_signed` additionally requires the direction to agree, since a gene
+      recovered with the wrong sign is not recovered. `spearman` is the rank correlation
+      of the DE score over *every* retained gene, a set-free companion that does not
+      depend on where `top_n` was cut. `random` is what a model that ranked genes at
+      random would score in expectation (`k / n_genes`), which is the floor to read
+      `overlap` against - "do nothing" cannot play that role here, since its score is
+      identically zero for every gene and its top-k is an arbitrary tie-break.
+    * `genes`: {"real": [...], model: [...]} - the top-k names (or indices when
+      `var_names` is None), so the actual genes can be inspected.
+    * `ceiling`: {`overlap`, `overlap_signed`} averaged over `n_ceiling` random half-splits
+      of the real cells, each half ranked against the same control cells. **1.0 is not the
+      target.** On ~34 held-out metacells the real top-k is itself unstable - some of its
+      genes are there because of sampling noise, and nothing can predict those - so this
+      is what agreement between two samples of the same truth looks like. It is the
+      counterpart of the split-half MMD floor in `mmd.comparable_ood_mmd`, and like it,
+      it is measured on halves: each side carries the noise of `n/2` cells where a model
+      is scored against all `n`, so a model may legitimately exceed it. Read it as a
+      guide, not a bound. NaN when there are too few real cells to split.
+    """
+    real = real.X if hasattr(real, "X") else real
+    real = np.asarray(real.toarray() if hasattr(real, "toarray") else real, dtype=np.float64)
+    control = control.X if hasattr(control, "X") else control
+    control = np.asarray(
+        control.toarray() if hasattr(control, "toarray") else control, dtype=np.float64
+    )
+
+    n_genes_all = real.shape[1]
+    if control.shape[1] != n_genes_all:
+        raise ValueError(
+            f"real has {n_genes_all} genes but control has {control.shape[1]} - both must "
+            "be the same feature space, in the same order."
+        )
+
+    keep = ((real > 0).mean(0) >= min_detection) | ((control > 0).mean(0) >= min_detection)
+    if not keep.any():
+        raise ValueError(
+            f"No gene is detected in >= {min_detection:.0%} of either the real or the "
+            "control cells, so there is nothing to rank."
+        )
+
+    names = np.asarray(list(var_names)) if var_names is not None else np.arange(n_genes_all)
+    names = names[keep]
+    n_genes = int(keep.sum())
+    k = int(min(top_n, n_genes))
+
+    def _top(score):
+        """The k genes with the largest |score|, ties broken by gene index.
+
+        `kind="stable"` and not the default quicksort: under `statistic="wilcoxon"` a
+        constant-shift prediction can hit the maximal statistic on hundreds of genes at
+        once (see `_de_scores`), and an unstable sort would make which of them lands in
+        the top-k depend on the sort's internals rather than on anything reproducible.
+        """
+        return np.argsort(-np.abs(score), kind="stable")[:k]
+
+    real_k, control_k = real[:, keep], control[:, keep]
+    truth = _de_scores(real_k, control_k, statistic)
+    truth_top = _top(truth)
+    truth_set = set(truth_top.tolist())
+
+    def _agreement(score_a, top_a, score_b, top_b):
+        """(overlap, signed overlap) between two top-k sets, as fractions of k."""
+        hits = set(top_a.tolist()) & set(top_b.tolist())
+        signed = [g for g in hits if np.sign(score_a[g]) == np.sign(score_b[g])]
+        return len(hits) / k, len(signed) / k
+
+    scores, genes = {}, {"real": names[truth_top].tolist()}
+    for model, pred in predictions.items():
+        pred = pred.X if hasattr(pred, "X") else pred
+        pred = np.asarray(
+            pred.toarray() if hasattr(pred, "toarray") else pred, dtype=np.float64
+        )
+        if pred.shape[1] != n_genes_all:
+            raise ValueError(
+                f"prediction '{model}' has {pred.shape[1]} genes, expected {n_genes_all}."
+            )
+
+        score = _de_scores(pred[:, keep], control_k, statistic)
+        top = _top(score)
+        overlap, overlap_signed = _agreement(truth, truth_top, score, top)
+
+        scores[model] = {
+            "overlap": overlap,
+            "overlap_signed": overlap_signed,
+            "spearman": float(spearmanr(truth, score).statistic),
+            "random": k / n_genes,
+            "n_genes": n_genes,
+            "k": k,
+        }
+        genes[model] = names[top].tolist()
+
+    # what agreement between two samples of the same truth looks like at this sample size
+    ceiling = {"overlap": np.nan, "overlap_signed": np.nan}
+    if len(real_k) >= 4:
+        rng = np.random.default_rng(seed)
+        pairs = []
+        for _ in range(n_ceiling):
+            perm = rng.permutation(len(real_k))
+            half = len(real_k) // 2
+            a = _de_scores(real_k[perm[:half]], control_k, statistic)
+            b = _de_scores(real_k[perm[half:]], control_k, statistic)
+            pairs.append(_agreement(a, _top(a), b, _top(b)))
+        ceiling = {
+            "overlap": float(np.mean([p[0] for p in pairs])),
+            "overlap_signed": float(np.mean([p[1] for p in pairs])),
+        }
+
+    return scores, genes, ceiling
 
 
 def gene_separability(real, generated, var_names, detect_threshold=0.1, canonicalize=True):
@@ -973,3 +1186,175 @@ def sample_from_means(analyzer, sigma=1.0):
     )
 
     return adata_sampled
+
+
+def direction_agreement(real, control, predictions, var_names=None, min_detection=0.1,
+                        lfc_grid=None, topn_grid=None, null_truths=None):
+    """Does a prediction get the *sign* of each DE gene right?
+
+    `effect_size_scores` already scores direction, but as a squared quantity dominated by
+    the largest-magnitude genes: a model can score well there while getting many mid-range
+    genes backwards. This is the per-gene version - the number that matters if the model
+    is to nominate genes as up- or down-regulated.
+
+    Two gene selections, because "DE gene" has no single definition and the answer depends
+    on it:
+
+    * **`lfc_grid`** - genes with `|real LFC| >= t`, swept over `t`. Sign is meaningless
+      for a gene that barely moved, so agreement is reported as a curve rather than at one
+      arbitrary cutoff.
+    * **`topn_grid`** - the top `n` genes by the real cells' signed Wilcoxon `z`, the
+      statistic `scanpy.rank_genes_groups` and every in-distribution section rank by, swept
+      over `n`. Note the ranking is taken on the **real** cells only; `_de_scores`
+      documents how badly that statistic misbehaves on a prediction that is the control
+      cells plus a constant, and this never applies it to a prediction.
+
+    Direction itself is always `sign(LFC)` in both selections - that is what the question
+    asks - so the Wilcoxon enters only as a gene *filter*.
+
+    **Read `agreement` against `baseline`, never against 0.5.** DE genes are rarely
+    balanced up/down; if 70% of them go up, predicting "everything up" scores 0.70 while
+    knowing nothing. `baseline` is `max(frac_up, frac_down)` over the selected genes, the
+    score of that do-nothing rule. And do not put a binomial p-value on `agreement`: genes
+    are strongly co-expressed, so the gene count is not a count of independent trials and
+    any such p-value is wildly anti-conservative. Pass `null_truths` for a null that
+    respects the correlation structure instead.
+
+    `null_truths`: optional {name: truth-matrix} of *mismatched* real cells - e.g. the same
+    cell type under a different cytokine. Each is scored the same way, giving an empirical
+    null that preserves both the gene-gene correlation and the up/down imbalance, and
+    answers "is this agreement specific to the right treatment, or would any shift score
+    it?". This is the same construction as `enrichment_shift.null_scores`.
+
+    `weighted` is `sum(|real LFC| * agrees) / sum(|real LFC|)` - the effect-size-weighted
+    agreement, far more stable to where the threshold falls than the plain fraction.
+
+    Returns a tidy DataFrame: `model, mode, x, n_genes, agreement, weighted, baseline`.
+    `real`, `control` and every prediction must already be in one common space
+    (`mmd.canonicalize`), exactly as for `de_gene_overlap`.
+    """
+    def _dense_mat(m):
+        m = m.X if hasattr(m, "X") else m
+        return np.asarray(m.toarray() if hasattr(m, "toarray") else m, dtype=np.float64)
+
+    real, control = _dense_mat(real), _dense_mat(control)
+    if control.shape[1] != real.shape[1]:
+        raise ValueError(
+            f"real has {real.shape[1]} genes but control has {control.shape[1]} - both "
+            "must be the same feature space, in the same order."
+        )
+
+    keep = ((real > 0).mean(0) >= min_detection) | ((control > 0).mean(0) >= min_detection)
+    if not keep.any():
+        raise ValueError(
+            f"No gene is detected in >= {min_detection:.0%} of either the real or the "
+            "control cells, so there is nothing to score."
+        )
+    n_genes = int(keep.sum())
+
+    real_lfc = _de_scores(real, control, "lfc")[keep]
+    real_wilcox = np.abs(_de_scores(real, control, "wilcoxon")[keep])
+
+    if lfc_grid is None:
+        # quantiles of the observed |LFC| rather than fixed values, so the grid spans this
+        # combo's actual effect sizes whatever their scale
+        lfc_grid = np.quantile(np.abs(real_lfc), np.linspace(0.0, 0.95, 20))
+    if topn_grid is None:
+        topn_grid = [n for n in (10, 25, 50, 100, 200, 500, 1000) if n <= n_genes]
+
+    curves = dict(predictions)
+    if null_truths:
+        curves.update({f"null: {k}": v for k, v in null_truths.items()})
+
+    rows = []
+    for name, pred in curves.items():
+        pred_lfc = _de_scores(_dense_mat(pred), control, "lfc")[keep]
+        agree = np.sign(pred_lfc) == np.sign(real_lfc)
+
+        for mode, grid in (("lfc_threshold", lfc_grid), ("wilcoxon_topn", topn_grid)):
+            for x in grid:
+                if mode == "lfc_threshold":
+                    sel = (np.abs(real_lfc) >= x) & (real_lfc != 0)
+                else:
+                    # stable sort: the Wilcoxon z ties on heavily zero-inflated genes
+                    order = np.argsort(-real_wilcox, kind="stable")[: int(x)]
+                    sel = np.zeros(n_genes, dtype=bool)
+                    sel[order] = True
+                    sel &= real_lfc != 0
+                if sel.sum() == 0:
+                    continue
+                up = float((real_lfc[sel] > 0).mean())
+                w = np.abs(real_lfc[sel])
+                rows.append(dict(
+                    model=name, mode=mode, x=float(x), n_genes=int(sel.sum()),
+                    agreement=float(agree[sel].mean()),
+                    weighted=float((w * agree[sel]).sum() / w.sum()),
+                    baseline=float(max(up, 1 - up)),
+                ))
+    return pd.DataFrame(rows)
+
+
+def plot_direction_agreement(scores, weighted=False, title=None, path=None, axes=None,
+                             show_baseline=True, err=None, ref_line=None, ylim=(0, 1.02)):
+    """Two panels from `direction_agreement`: agreement vs the |LFC| cutoff, and vs the
+    number of top Wilcoxon genes.
+
+    `show_baseline` draws the majority-direction baseline - what predicting a single
+    direction for every gene would score. It moves with the gene set, so it is drawn per
+    panel rather than quoted once. Turn it off when the plotted quantity is already an
+    *excess* over that baseline, where it would sit at zero and say nothing.
+
+    `err`: name of a column holding a spread to draw as error bars, e.g. the standard
+    deviation across held-out combos when the curves are combo averages. Nothing is
+    inferred - a curve is only given error bars if the column is there.
+
+    Any `null: *` series (mismatched real cells, see `direction_agreement`) is drawn dotted
+    and grey: a model needs to sit above those, not merely above 0.5.
+    """
+    if axes is None:
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    else:
+        fig = axes[0].figure
+    col = "weighted" if weighted else "agreement"
+    if ref_line is None:
+        # 0.5 is the coin-flip reference for a raw agreement; for an excess the reference
+        # the caller has already subtracted sits at zero
+        ref_line = 0.5 if show_baseline else 0.0
+
+    for ax, mode, xlabel in (
+        (axes[0], "lfc_threshold", r"|real LFC| cutoff"),
+        (axes[1], "wilcoxon_topn", "top n genes by real Wilcoxon |z|"),
+    ):
+        sub = scores[scores["mode"] == mode]
+        if sub.empty:
+            continue
+        for name, g in sub.groupby("model"):
+            g = g.sort_values("x")
+            is_null = str(name).startswith("null:")
+            style = dict(marker="o", ms=3.5, ls=":" if is_null else "-",
+                         lw=1.2 if is_null else 1.8,
+                         color="grey" if is_null else None,
+                         alpha=0.7 if is_null else 1.0, label=name)
+            if err is not None and err in g:
+                ax.errorbar(g["x"], g[col], yerr=g[err], capsize=2.5, elinewidth=0.9,
+                            **style)
+            else:
+                ax.plot(g["x"], g[col], **style)
+        if show_baseline:
+            base = sub.groupby("x")["baseline"].mean().sort_index()
+            ax.plot(base.index, base.values, ls="--", lw=1.3, color="black",
+                    label="majority-direction baseline")
+        ax.axhline(ref_line, color="grey", lw=0.8, alpha=0.5)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(("effect-size-weighted " if weighted else "") + "sign agreement")
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.grid(alpha=0.3)
+        if mode == "wilcoxon_topn":
+            ax.set_xscale("log")
+    axes[0].legend(fontsize=8, loc="best")
+    fig.suptitle(title or "Does the model get the direction of DE genes right?", fontsize=12)
+    fig.tight_layout()
+    if path:
+        fig.savefig(path, dpi=300, bbox_inches="tight")
+    return fig
