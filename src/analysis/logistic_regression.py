@@ -16,6 +16,7 @@ from src.model.data_utils import (
     create_latent_adata,
     prepare_train_test_data,
     prepare_data,
+    get_condition_vocab,
     AdataDataset,
 )
 
@@ -383,10 +384,10 @@ def generate_counterfactuals_cpa(analyzer, key):
     return x_cfs, z_cfs, all_source_labels, key
 
 
-def generate_counterfactuals_scvi(analyzer, key):
-    """scVI counterpart to generate_counterfactuals_scgen: for every other condition
-    ("source"), encodes source cells to latent space, shifts by the learned mixture-prior
-    per-condition mean difference, then decodes back to raw-count scale directly via
+def generate_counterfactuals_scvi(analyzer, key, batch_size=2048):
+    """scVI counterpart to generate_counterfactuals_scgen: encodes every cell not already
+    at `key`, shifts it by the learned mixture-prior mean difference between its own
+    component and its target component, then decodes back to raw-count scale directly via
     module.generative - calling the underlying MixturePriorSCVI model directly instead of
     going through SCVIMixturePriorWrapper.forward()/the generic mean-shift
     generate_counterfactuals.
@@ -400,6 +401,24 @@ def generate_counterfactuals_scvi(analyzer, key):
     size (log of its own raw-count total), mirroring how generate_counterfactuals_scgen
     normalizes SCGENMixturePriorWrapper's output against the source's real total.
 
+    The prior is indexed by whatever `assign_cluster_idx` clustered on. When
+    `analyzer.conditions` names more than one condition that is the "__"-joined *combo*
+    ("IL-4__NK") - one component per cytokine x cell type, 198 of them here - so the
+    target is not a single constant row: it is per cell, holding every other condition at
+    that cell's own value and moving only `labels_key` to `key`. This is the same rule
+    generate_counterfactuals and the INN_OOD samplers follow. With a single condition,
+    combo labels are that condition's own values and this reduces to one shift per source.
+
+    Indexing 198 combo components with an 11-valued cytokine code is what this used to do,
+    which silently read eleven *cell types under one cytokine* as if they were the eleven
+    cytokines. Correct only in the single-condition case it was written for.
+
+    `analyzer.combo_categories` pins the numbering to the model's own vocabulary; without
+    it the vocabulary is rebuilt with `get_condition_vocab`, the same function that built
+    the model's. Do not substitute the sorted unique combos present in `adata`: that drops
+    empty combos, and it is not even the same order (product order puts "IL-2__B" before
+    "IL-21__A"; lexicographic order does the opposite, since '1' < '_').
+
     analyzer.model must be a SCVIMixturePriorWrapper around a trained MixturePriorSCVI.
     analyzer.adata must hold raw counts, matching what MixturePriorSCVI was registered on
     via `layer="counts"` (see get_VAE in src/model/VAE/VAE_model.py).
@@ -409,54 +428,78 @@ def generate_counterfactuals_scvi(analyzer, key):
     wrapper = analyzer.model
     module = wrapper.module
 
-    cats = adata.obs[f"{labels_key}"].astype("category").cat.categories.tolist()
-    if key not in cats:
-        raise ValueError(f"key '{key}' not found in adata.obs['{labels_key}']")
-    key_idx = cats.index(key)
+    combo_order = list(analyzer.conditions) if analyzer.conditions else [labels_key]
+    if labels_key not in combo_order:
+        raise ValueError(f"labels_key '{labels_key}' is not among conditions {combo_order}.")
+    label_pos = combo_order.index(labels_key)
+
+    cats = analyzer.combo_categories
+    if cats is None:
+        _, cats = get_condition_vocab(adata, combo_order)
+    cats = list(cats)
+
     means = wrapper.means.detach().to(device=analyzer.device, dtype=analyzer.dtype)
+    if len(cats) != means.shape[0]:
+        raise ValueError(
+            f"The prior has {means.shape[0]} components but the combo vocabulary has "
+            f"{len(cats)} entries ({combo_order}). They index the same thing, so a "
+            "mismatch means the analyzer was built with a different vocabulary than the "
+            "model was trained on."
+        )
+
+    key_values = sorted({c.split("__")[label_pos] for c in cats})
+    if key not in key_values:
+        raise ValueError(f"key '{key}' not found among '{labels_key}' values {key_values}")
+
+    # per-combo source -> target lookup, then per cell
+    cat_to_idx = {c: i for i, c in enumerate(cats)}
+    target_of = {}
+    for c in cats:
+        parts = c.split("__")
+        parts[label_pos] = key
+        target_of[c] = cat_to_idx.get("__".join(parts), -1)
+
+    cell_combo = adata.obs[combo_order].astype(str).agg("__".join, axis=1).to_numpy()
+    source_idx = np.array([cat_to_idx.get(c, -1) for c in cell_combo])
+    target_idx = np.array([target_of.get(c, -1) for c in cell_combo])
+
+    # drop cells already at `key`, and any whose own or target combo has no component
+    keep = (source_idx >= 0) & (target_idx >= 0) & (target_idx != source_idx)
+    rows = np.flatnonzero(keep)
+    if rows.size == 0:
+        raise ValueError(
+            f"No cell can be moved to '{labels_key}'='{key}': every row is already there, "
+            "or its combo is missing from the vocabulary."
+        )
+
+    z_all = np.asarray(wrapper.get_latent_representation(adata))
+    counts = adata.X.toarray() if hasattr(adata.X, "toarray") else np.asarray(adata.X)
+    library_all = np.log(counts.sum(axis=1, keepdims=True))
+
+    # the labels_key component only, so callers that group by it (mmd_dists' per-group
+    # breakdown) still match against adata.obs[labels_key]
+    all_source_labels = [cell_combo[i].split("__")[label_pos] for i in rows]
 
     all_x_cf = []
     all_z_cf = []
-    all_source_labels = []
+    with torch.no_grad():
+        for start in range(0, rows.size, batch_size):
+            sel = rows[start : start + batch_size]
+            z_source = torch.as_tensor(z_all[sel], device=analyzer.device, dtype=analyzer.dtype)
+            s = torch.as_tensor(source_idx[sel], device=analyzer.device, dtype=torch.long)
+            t = torch.as_tensor(target_idx[sel], device=analyzer.device, dtype=torch.long)
+            z_cf = z_source + (means[t] - means[s])
 
-    for source in cats:
-        if source == key:
-            continue
-
-        adata_source = adata[adata.obs[f"{labels_key}"] == source].copy()
-        if adata_source.n_obs == 0:
-            continue
-
-        source_idx = cats.index(source)
-        n = adata_source.n_obs
-
-        z_source = torch.tensor(
-            wrapper.get_latent_representation(adata_source),
-            device=analyzer.device,
-            dtype=analyzer.dtype,
-        )
-        z_cf = z_source + (means[key_idx] - means[source_idx])
-
-        source_x = adata_source.X
-        source_counts = source_x.toarray() if hasattr(source_x, "toarray") else source_x
-        library = torch.log(
-            torch.tensor(
-                source_counts.sum(axis=1, keepdims=True),
-                device=analyzer.device,
-                dtype=analyzer.dtype,
+            library = torch.as_tensor(
+                library_all[sel], device=analyzer.device, dtype=analyzer.dtype
             )
-        )
-        batch_index = torch.full(
-            (n, 1), wrapper.default_batch_index, dtype=torch.long, device=analyzer.device
-        )
+            batch_index = torch.full(
+                (sel.size, 1), wrapper.default_batch_index, dtype=torch.long, device=analyzer.device
+            )
+            x_cf = module.generative(z_cf, library, batch_index)["px"].mu
 
-        with torch.no_grad():
-            generative_out = module.generative(z_cf, library, batch_index)
-        x_cf = generative_out["px"].mu
-
-        all_x_cf.append(x_cf.cpu())
-        all_z_cf.append(z_cf.cpu())
-        all_source_labels.extend([source] * n)
+            all_x_cf.append(x_cf.cpu())
+            all_z_cf.append(z_cf.cpu())
 
     x_cfs = torch.cat(all_x_cf, dim=0)
     z_cfs = torch.cat(all_z_cf, dim=0)
